@@ -1,0 +1,17 @@
+export const MAP_COLORS = {
+  background: "#050c0b",
+  frame: "#0c1d19",
+  frameLine: "#6fd49a",
+  canopy: "#4fd67a",
+  canopyLine: "#a8f5a0",
+  interrow: "#e8c46a",
+  interrowLine: "#ffd873",
+  interrowSelected: "#fff0b8",
+  waste: "#ffb547",
+  wasteSelected: "#ffe08a",
+  row: "#c6e98a",
+  route: "#a08cff",
+  routeFlow: "#ece8ff",
+  halo: "#f4ffe6",
+  scan: "#c6e98a",
+} as const;
