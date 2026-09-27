@@ -28,9 +28,9 @@ export async function deleteProject(id: Id): Promise<void> {
   await api.delete(`/projects/${id}`);
 }
 
-export async function uploadRaster(id: Id, file: File, onProgress?: (fraction: number) => void): Promise<Raster> {
+export async function uploadRaster(id: Id, files: File[], onProgress?: (fraction: number) => void): Promise<Raster> {
   const form = new FormData();
-  form.append("file", file);
+  for (const file of files) form.append("file", file);
   const res = await api.post<Raster>(`/projects/${id}/raster`, form, {
     timeout: RASTER_UPLOAD_TIMEOUT_MS,
     onUploadProgress: (event) => {

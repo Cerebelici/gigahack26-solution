@@ -26,6 +26,6 @@ export const ROUTE_START_EPSG32635 = [629504.7, 5220250.75] as const;
 
 export const ROUTE_RULES = [
   "Starts and returns to the start point within 5 m",
-  "Walks only on inter-rows and authorised passages",
+  "Stays off obstacles. The rest of the map is walkable",
   "A target counts as visited within 2 m",
 ];

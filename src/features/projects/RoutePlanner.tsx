@@ -26,6 +26,10 @@ type RoutePlannerProps = {
   onPlace: (placing: boolean) => void;
   onPlan: () => void;
   onClearRoute: () => void;
+  onClearStart: () => void;
+  onClearTargets: () => void;
+  /** Clears the route type, start point, targets, and planned route. */
+  onReset: () => void;
 };
 
 function targetMeta(count: number): string {
@@ -57,12 +61,21 @@ export function RoutePlanner({
   onPlace,
   onPlan,
   onClearRoute,
+  onClearStart,
+  onClearTargets,
+  onReset,
 }: RoutePlannerProps) {
+  const touched = routeType !== null || anchor !== null || targetCount > 0 || result !== null;
   return (
     <section className="gbm-route">
       <div className="gbm-section-head">
         <h4>Route planning</h4>
         <span>{targetMeta(targetCount)}</span>
+        {touched && (
+          <button type="button" className="gbm-text-btn gbm-route-reset" onClick={onReset}>
+            Reset
+          </button>
+        )}
       </div>
       {block && <p className="gbm-route-hint">This walk uses {block} only. Other blocks are left out.</p>}
 
@@ -90,9 +103,14 @@ export function RoutePlanner({
 
       <StepHead step={2} title="Start and end point" done={anchor !== null} />
       {anchor && (
-        <p className="gbm-route-point">
-          {anchor[0].toFixed(2)}, {anchor[1].toFixed(2)}
-        </p>
+        <div className="gbm-route-row">
+          <p className="gbm-route-point">
+            {anchor[0].toFixed(2)}, {anchor[1].toFixed(2)}
+          </p>
+          <button type="button" className="gbm-text-btn" onClick={onClearStart} aria-label="Clear start point">
+            Clear
+          </button>
+        </div>
       )}
       <button
         type="button"
@@ -117,6 +135,11 @@ export function RoutePlanner({
       >
         {targetPick ? "Done selecting" : "Add or remove targets"}
       </button>
+      {targetCount > 0 && (
+        <button type="button" className="gbm-text-btn gbm-route-clear" onClick={onClearTargets}>
+          Clear all {targetMeta(targetCount)}
+        </button>
+      )}
       {targetPick && (
         <p className="gbm-route-hint">
           Click an object to add or remove it. Inter-rows and row axes are not targets, except a disrupted row.

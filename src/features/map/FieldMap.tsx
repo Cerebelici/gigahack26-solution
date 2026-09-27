@@ -169,17 +169,41 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
     (next: RouteTypeId) => {
       setRouteType(next);
       setTargetFids(routeTargetFids(next, routeItems));
-      const start = anchor ?? defaultStart(data);
-      setAnchor(start);
-      // Without a start the next map click must place one, so say so on the map right away.
-      if (!start) {
-        setPlacing(true);
-        setTargetPick(false);
+      // Only the first choice fills in the start; switching type keeps a start the user cleared.
+      if (routeType === null && !anchor) {
+        const start = defaultStart(data);
+        setAnchor(start);
+        // Without a start the next map click must place one, so say so on the map right away.
+        if (!start) {
+          setPlacing(true);
+          setTargetPick(false);
+        }
       }
       staleRoute();
     },
-    [anchor, data, routeItems, staleRoute],
+    [routeType, anchor, data, routeItems, staleRoute],
   );
+
+  const clearStart = useCallback(() => {
+    setAnchor(null);
+    setPlacing(false);
+    staleRoute();
+  }, [staleRoute]);
+
+  const clearTargets = useCallback(() => {
+    setTargetFids([]);
+    setTargetPick(false);
+    staleRoute();
+  }, [staleRoute]);
+
+  const resetRoute = useCallback(() => {
+    setRouteType(null);
+    setTargetFids([]);
+    setAnchor(null);
+    setPlacing(false);
+    setTargetPick(false);
+    staleRoute();
+  }, [staleRoute]);
 
   const chooseBlock = useCallback(
     (block: string | null) => {
@@ -239,10 +263,10 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
   }, []);
 
   const onMapClick = useCallback(
-    ({ fids, lngLat }: MapClick) => {
+    ({ fids, lngLat, metaKey }: MapClick) => {
+      if (metaKey) lookupCadastral(lngLat);
       if (!planRoute) {
         setSelectedId(fids[0] ?? null);
-        lookupCadastral(lngLat);
         return;
       }
       const decision = decideRouteClick({ pick: targetPick, place: placing }, fids, targetPick ? routeItems : data.items);
@@ -259,7 +283,6 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
         return;
       }
       setSelectedId(decision.fid);
-      lookupCadastral(lngLat);
     },
     [planRoute, targetPick, placing, data.items, routeItems, toggleTarget, staleRoute, lookupCadastral],
   );
@@ -405,6 +428,9 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
                 onPlace={onPlace}
                 onPlan={planNow}
                 onClearRoute={staleRoute}
+                onClearStart={clearStart}
+                onClearTargets={clearTargets}
+                onReset={resetRoute}
               />
             </aside>
           )}

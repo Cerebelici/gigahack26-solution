@@ -436,6 +436,8 @@ function addFieldLayers(map: MapLibreMap, data: FieldData) {
 export type MapClick = {
   fids: number[];
   lngLat: LngLatPair;
+  /** Command was held for this click. Cadastral lookup is gated on it. */
+  metaKey: boolean;
 };
 
 export type MapInteraction = {
@@ -595,7 +597,11 @@ export function MapView({
         })),
         interactionRef.current.pick,
       );
-      onMapClickRef.current({ fids, lngLat: [event.lngLat.lng, event.lngLat.lat] });
+      onMapClickRef.current({
+        fids,
+        lngLat: [event.lngLat.lng, event.lngLat.lat],
+        metaKey: event.originalEvent.metaKey,
+      });
     });
 
     map.on("mousemove", (event) => {

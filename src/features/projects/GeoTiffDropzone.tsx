@@ -19,23 +19,39 @@ function formatSize(bytes: number): string {
 }
 
 interface GeoTiffDropzoneProps {
-  file: File | null;
+  files: File[];
   disabled: boolean;
-  onChange: (file: File | null) => void;
+  onChange: (files: File[]) => void;
   onReject: (message: string) => void;
 }
 
-export function GeoTiffDropzone({ file, disabled, onChange, onReject }: GeoTiffDropzoneProps) {
+function fileKey(file: File): string {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
+export function GeoTiffDropzone({ files, disabled, onChange, onReject }: GeoTiffDropzoneProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
 
-  function selectFile(candidate: File | undefined) {
-    if (!candidate) return;
-    if (!isAcceptedImagery(candidate)) {
-      onReject("Only a GeoTIFF or a zip of GeoTIFFs is supported.");
-      return;
+  function selectFiles(candidates: FileList | File[] | undefined) {
+    const incoming = candidates ? [...candidates] : [];
+    if (incoming.length === 0) return;
+    const rejected = incoming.filter((candidate) => !isAcceptedImagery(candidate));
+    const accepted = incoming.filter((candidate) => isAcceptedImagery(candidate));
+    if (accepted.length > 0) {
+      const seen = new Set(files.map(fileKey));
+      const next = [...files];
+      for (const candidate of accepted) {
+        const key = fileKey(candidate);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        next.push(candidate);
+      }
+      onChange(next);
     }
-    onChange(candidate);
+    if (rejected.length > 0) {
+      onReject("Only GeoTIFFs or zips of GeoTIFFs are supported.");
+    }
   }
 
   function openPicker() {
@@ -43,7 +59,7 @@ export function GeoTiffDropzone({ file, disabled, onChange, onReject }: GeoTiffD
   }
 
   function onInputChange(e: ChangeEvent<HTMLInputElement>) {
-    selectFile(e.target.files?.[0]);
+    selectFiles(e.target.files ?? undefined);
     e.target.value = "";
   }
 
@@ -67,7 +83,7 @@ export function GeoTiffDropzone({ file, disabled, onChange, onReject }: GeoTiffD
     e.preventDefault();
     setDragging(false);
     if (disabled) return;
-    selectFile(e.dataTransfer.files?.[0]);
+    selectFiles(e.dataTransfer.files);
   }
 
   const dropzoneClass = ["dropzone", dragging && "dragging", disabled && "disabled"].filter(Boolean).join(" ");
@@ -97,24 +113,35 @@ export function GeoTiffDropzone({ file, disabled, onChange, onReject }: GeoTiffD
             />
           </svg>
         </span>
-        <strong>Drop a GeoTIFF or a zip of tiles here, or click to browse</strong>
-        <span className="muted upload-hint">Accepted formats: .tif, .tiff, .zip</span>
-        <input ref={inputRef} type="file" accept={ACCEPTED_EXTENSIONS.join(",")} onChange={onInputChange} hidden />
+        <strong>Drop GeoTIFFs or zips of tiles here, or click to browse</strong>
+        <span className="muted upload-hint">Several zips are stitched into one map. Accepted formats: .tif, .tiff, .zip</span>
+        <input
+          ref={inputRef}
+          type="file"
+          accept={ACCEPTED_EXTENSIONS.join(",")}
+          multiple
+          onChange={onInputChange}
+          hidden
+        />
       </div>
 
-      {file && (
-        <div className="upload-file">
-          <span className="upload-file-icon">{fileKind(file)}</span>
-          <div className="upload-file-meta">
-            <strong title={file.name}>{file.name}</strong>
-            <span className="muted">{formatSize(file.size)}</span>
-          </div>
-          {!disabled && (
-            <button type="button" className="btn-ghost" onClick={() => onChange(null)}>
-              Remove
-            </button>
-          )}
-        </div>
+      {files.length > 0 && (
+        <ul className="upload-files">
+          {files.map((file, index) => (
+            <li key={fileKey(file)} className="upload-file">
+              <span className="upload-file-icon">{fileKind(file)}</span>
+              <div className="upload-file-meta">
+                <strong title={file.name}>{file.name}</strong>
+                <span className="muted">{formatSize(file.size)}</span>
+              </div>
+              {!disabled && (
+                <button type="button" className="btn-ghost" onClick={() => onChange(files.filter((_, i) => i !== index))}>
+                  Remove
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
       )}
     </>
   );

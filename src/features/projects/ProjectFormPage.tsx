@@ -25,7 +25,7 @@ function UploadProgress({ fraction }: { fraction: number }) {
   return (
     <div className="upload-progress">
       <div className="upload-progress-head">
-        <span>{processing ? "Processing imagery" : "Uploading GeoTIFF"}</span>
+        <span>{processing ? "Processing imagery" : "Uploading imagery"}</span>
         {!processing && <span className="upload-progress-value">{percent}%</span>}
       </div>
       <div
@@ -74,7 +74,7 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
   const [project, setProject] = useState<Project | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [name, setName] = useState("");
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(() => readError(location.state));
@@ -97,11 +97,11 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
   const busy = phase.kind !== "idle" || deleting;
   const trimmed = name.trim();
   const renamed = isEdit && project !== null && trimmed !== project.name;
-  const canSubmit = !busy && trimmed !== "" && (!isEdit || (project !== null && (renamed || file !== null)));
+  const canSubmit = !busy && trimmed !== "" && (!isEdit || (project !== null && (renamed || files.length > 0)));
 
-  async function upload(id: Id, chosen: File) {
+  async function upload(id: Id, chosen: File[]) {
     setPhase({ kind: "uploading", fraction: 0 });
-    // The backend stores the file's annotations with the raster; the project view reads them back.
+    // The backend stores the files' annotations with the raster; the project view reads them back.
     await uploadRaster(id, chosen, (fraction) => setPhase({ kind: "uploading", fraction }));
   }
 
@@ -120,9 +120,9 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
         setPhase({ kind: "idle" });
         return;
       }
-      if (file) {
+      if (files.length > 0) {
         try {
-          await upload(created.id, file);
+          await upload(created.id, files);
         } catch (err) {
           // The project exists now; retry the upload from its edit page instead of creating a duplicate.
           const message = `Project created, but the upload failed: ${describeError(err, "Upload failed")}`;
@@ -140,7 +140,7 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
         const updated = await renameProject(projectId, trimmed);
         setProject((current) => (current ? { ...current, name: updated.name ?? trimmed } : current));
       }
-      if (file) await upload(projectId, file);
+      if (files.length > 0) await upload(projectId, files);
       navigate(`/projects/${projectId}`);
     } catch (err) {
       setError(describeError(err, "Could not save the project"));
@@ -162,7 +162,7 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
     }
   }
 
-  const submitLabel = isEdit ? "Save changes" : file ? "Create and upload" : "Create project";
+  const submitLabel = isEdit ? "Save changes" : files.length > 0 ? "Create and upload" : "Create project";
   const size = project ? rasterSize(project) : null;
 
   return (
@@ -189,8 +189,8 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
               <span className="section-label">{isEdit ? "Edit project" : "New project"}</span>
               <h1 className="card-title">{isEdit ? project?.name : "Create a project"}</h1>
               <p className="muted upload-lede">
-                A project holds one orthophoto and the annotations drawn on it. Upload a GeoTIFF, or a zip of
-                GeoTIFF tiles and the XML annotations for those tiles.
+                A project holds one orthophoto and the annotations drawn on it. Upload a GeoTIFF, or one or
+                more zips of GeoTIFF tiles and their XML annotations. Several zips become one map.
               </p>
             </div>
 
@@ -220,11 +220,11 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
                 </div>
               )}
               <GeoTiffDropzone
-                file={file}
+                files={files}
                 disabled={busy}
                 onChange={(next) => {
                   setError(null);
-                  setFile(next);
+                  setFiles(next);
                 }}
                 onReject={setError}
               />

@@ -421,6 +421,28 @@ a.gbm-text-btn {
   background: linear-gradient(transparent, var(--card-solid) 14px);
 }
 
+.gbm-route-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px 4px;
+}
+
+.gbm-route-row .gbm-route-point {
+  margin: 0;
+}
+
+.gbm-route-clear {
+  display: block;
+  margin: -2px 0 4px auto;
+}
+
+.gbm-section-head .gbm-route-reset {
+  margin: -4px -6px -4px 0;
+  padding: 4px 8px;
+}
+
 .gbm-route-rules-box {
   margin: 12px 4px 0;
   font-size: 11.5px;
