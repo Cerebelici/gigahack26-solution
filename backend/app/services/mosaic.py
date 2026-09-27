@@ -44,13 +44,6 @@ logger = logging.getLogger(__name__)
 TIFF_SUFFIXES = {".tif", ".tiff"}
 MAX_SIDE = 120_000
 MAX_ZIP_BYTES = 8 * 1024**3
-# Temporary. A magenta frame on each source tile inside the mosaic, wide enough to survive
-# overview downsampling. Remove when those edges no longer need to show on the map.
-SOURCE_BORDER_COLOR = (255, 0, 255)
-
-
-def source_border_px(width: int, height: int) -> int:
-    return max(1, min(width, height) // 48)
 
 
 @dataclass(frozen=True)
@@ -373,7 +366,6 @@ def _paste_aligned(src: DatasetReader, dst: DatasetWriter, col: int, row: int) -
     window = Window(col, row, src.width, src.height)
     dst.write(_read_rgb(src), indexes=(1, 2, 3), window=window)
     dst.write(np.full((src.height, src.width), 255, dtype=np.uint8), indexes=4, window=window)
-    _frame(dst, col, row, src.width, src.height)
 
 
 def _paste_reprojected(src: DatasetReader, dst: DatasetWriter, dst_crs: CRS) -> None:
