@@ -411,7 +411,7 @@ def _paste_reprojected(src: DatasetReader, dst: DatasetWriter, dst_crs: CRS) -> 
     _frame(dst, col0, row0, col1 - col0, row1 - row0)
 
 
-def _frame(dst: rasterio.DatasetWriter, col: int, row: int, width: int, height: int) -> None:
+def _frame(dst: DatasetWriter, col: int, row: int, width: int, height: int) -> None:
     """Paint the edge of one pasted source tile. The interior is left as copied."""
     px = min(source_border_px(width, height), width, height)
 
