@@ -1,0 +1,541 @@
+/* Stage: fixed behind the page. The page content sits above it; the HUD never takes pointer events. */
+
+.hero-page {
+  position: relative;
+  z-index: 1;
+}
+
+.hero-stage {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--bg);
+}
+
+.hero-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  transition: opacity 1.2s ease;
+}
+
+.hero-stage.is-ready .hero-canvas {
+  opacity: 1;
+}
+
+.hero-vignette {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    linear-gradient(90deg, rgba(5, 12, 11, 0.8) 0%, rgba(5, 12, 11, 0.42) 32%, rgba(5, 12, 11, 0) 52%),
+    linear-gradient(0deg, rgba(5, 12, 11, 0.7) 0%, rgba(5, 12, 11, 0) 22%),
+    linear-gradient(180deg, rgba(5, 12, 11, 0.55) 0%, rgba(5, 12, 11, 0) 18%),
+    repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 1px, transparent 1px 3px);
+}
+
+/* Fallback while three.js loads, or without WebGL */
+
+.hero-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.hero-blob {
+  position: absolute;
+  width: 46vmax;
+  height: 46vmax;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.35;
+  animation: blob-drift 22s ease-in-out infinite alternate;
+}
+
+.hero-blob:nth-child(1) {
+  top: -14vmax;
+  left: -10vmax;
+  background: #2f7d4a;
+}
+
+.hero-blob:nth-child(2) {
+  right: -14vmax;
+  top: 10vmax;
+  background: #5b49c9;
+  animation-duration: 28s;
+  animation-direction: alternate-reverse;
+}
+
+.hero-blob:nth-child(3) {
+  left: 30vw;
+  bottom: -22vmax;
+  background: #8fb54d;
+  opacity: 0.22;
+  animation-duration: 34s;
+}
+
+.hero-grid {
+  position: absolute;
+  left: -50%;
+  right: -50%;
+  bottom: -10%;
+  height: 60%;
+  background-image:
+    linear-gradient(rgba(198, 233, 138, 0.14) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(198, 233, 138, 0.14) 1px, transparent 1px);
+  background-size: 56px 56px;
+  transform: perspective(520px) rotateX(62deg);
+  transform-origin: 50% 0;
+  mask-image: linear-gradient(transparent, #000 35%, #000 70%, transparent);
+  animation: grid-flow 6s linear infinite;
+}
+
+.hero-scan {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--lime), transparent);
+  box-shadow: 0 0 24px 4px rgba(198, 233, 138, 0.35);
+  opacity: 0.55;
+  animation: scan-down 7s linear infinite;
+}
+
+/* Layout: copy on the left, the auth card on the right, room at the bottom for the HUD. */
+
+.hero-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 440px);
+  align-items: center;
+  gap: 48px;
+  width: 100%;
+  max-width: 1240px;
+  min-height: calc(100vh - 110px);
+  margin: 0 auto;
+  padding: 24px 8px 250px;
+}
+
+.hero-main .auth-card {
+  margin-top: 0;
+  justify-self: end;
+}
+
+.hero-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 600px;
+  animation: rise-in 0.7s var(--ease-out) both;
+}
+
+.hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  align-self: flex-start;
+  padding: 6px 14px 6px 10px;
+  border-radius: 999px;
+  background: rgba(198, 233, 138, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(198, 233, 138, 0.25);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--lime);
+}
+
+.hero-live {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--lime);
+  animation: beacon 1.6s ease-out infinite;
+}
+
+.hero-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(40px, 5.4vw, 72px);
+  font-weight: 700;
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+  text-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+}
+
+.hero-title span {
+  display: block;
+  background: linear-gradient(90deg, var(--lime), var(--green) 55%, #7fe0b0);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0 24px rgba(198, 233, 138, 0.25));
+}
+
+.hero-lede {
+  margin: 0;
+  max-width: 520px;
+  font-size: 17px;
+  line-height: 1.6;
+  color: #c3d6cb;
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.hero-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  margin: 8px 0 0;
+}
+
+.hero-stats > div {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 2px;
+}
+
+.hero-stats dt {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.hero-stats dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.hero-stats small {
+  font-size: 12px;
+  color: var(--lime);
+}
+
+/* Drone reticle, positioned every frame from the scene */
+
+.hero-tracker {
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  top: 0;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  will-change: transform;
+}
+
+.hero-tracker-ring {
+  position: absolute;
+  left: -30px;
+  top: -30px;
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  border: 1.5px dashed rgba(198, 233, 138, 0.75);
+  box-shadow: 0 0 18px rgba(198, 233, 138, 0.25);
+  animation: tracker-spin 8s linear infinite;
+}
+
+.hero-tracker-ring::after {
+  content: "";
+  position: absolute;
+  inset: 22px;
+  border-radius: 50%;
+  background: var(--lime);
+  box-shadow: 0 0 10px var(--lime);
+  opacity: 0.8;
+}
+
+.hero-tracker-label {
+  position: absolute;
+  left: 40px;
+  top: -34px;
+  display: grid;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(5, 12, 11, 0.72);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  color: var(--lime);
+}
+
+.hero-tracker-label small {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+/* HUD strip: telemetry on the left, stacked annotation layers on the right */
+
+.hero-hud {
+  position: absolute;
+  z-index: 2;
+  left: 24px;
+  right: 24px;
+  bottom: 22px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.hero-telemetry {
+  width: 400px;
+  padding: 14px 16px 12px;
+  border-radius: 16px;
+  border: 1px solid transparent;
+  background:
+    linear-gradient(rgba(8, 18, 16, 0.72), rgba(8, 18, 16, 0.72)) padding-box,
+    var(--edge) border-box;
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow), var(--glow);
+  font-family: var(--font-mono);
+  animation: rise-in 0.7s var(--ease-out) both 0.3s;
+}
+
+.hero-telemetry header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.hero-phase {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(198, 233, 138, 0.12);
+  color: var(--lime);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.hero-phase.is-routing {
+  background: rgba(160, 140, 255, 0.16);
+  color: #c9bfff;
+}
+
+.hero-phase.is-complete {
+  background: rgba(95, 214, 138, 0.18);
+  color: #9cf0bb;
+}
+
+.hero-coverage {
+  position: relative;
+  height: 4px;
+  margin: 12px 0 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--well);
+}
+
+.hero-coverage > span {
+  position: absolute;
+  inset: 0;
+  transform-origin: left;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--green), var(--lime));
+  box-shadow: 0 0 12px var(--lime);
+  transition: transform 0.12s linear;
+}
+
+.hero-telemetry dl {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px 12px;
+  margin: 0;
+}
+
+.hero-telemetry dt {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.hero-telemetry dd {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-telemetry dd.is-waste {
+  color: #ffb547;
+}
+
+.hero-telemetry dd.is-gap,
+.hero-telemetry dd.is-route {
+  color: #b9adff;
+}
+
+.hero-telemetry footer {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.hero-layers {
+  position: relative;
+  width: 280px;
+  height: 250px;
+  perspective: 900px;
+  animation: rise-in 0.7s var(--ease-out) both 0.45s;
+}
+
+.hero-layer {
+  position: absolute;
+  left: 20px;
+  bottom: 0;
+  margin: 0;
+  width: 220px;
+  transform-style: preserve-3d;
+  transform: rotateX(58deg) rotateZ(-38deg);
+  transform-origin: 50% 50%;
+  animation: layer-float 6s ease-in-out infinite;
+}
+
+.hero-layer:nth-child(1) {
+  bottom: 124px;
+  animation-delay: -1s;
+}
+
+.hero-layer:nth-child(2) {
+  bottom: 62px;
+  animation-delay: -2s;
+}
+
+.hero-layer canvas {
+  display: block;
+  width: 220px;
+  height: 140px;
+  border-radius: 10px;
+  border: 1px solid rgba(198, 233, 138, 0.35);
+  background: rgba(10, 24, 20, 0.55);
+  box-shadow:
+    0 0 0 1px rgba(5, 12, 11, 0.4),
+    0 18px 40px rgba(0, 0, 0, 0.45),
+    0 0 22px rgba(198, 233, 138, 0.12);
+}
+
+.hero-layer.is-route canvas {
+  border-color: rgba(160, 140, 255, 0.45);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45), 0 0 22px rgba(160, 140, 255, 0.18);
+}
+
+.hero-layer figcaption {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgba(5, 12, 11, 0.7);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.hero-layer figcaption span {
+  color: var(--lime);
+}
+
+@keyframes tracker-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+@keyframes layer-float {
+  50% {
+    translate: 0 -5px;
+  }
+}
+
+@keyframes blob-drift {
+  to {
+    translate: 8vmax 6vmax;
+    scale: 1.15;
+  }
+}
+
+@keyframes grid-flow {
+  to {
+    background-position: 0 56px;
+  }
+}
+
+@keyframes scan-down {
+  from {
+    translate: 0 -10vh;
+  }
+  to {
+    translate: 0 110vh;
+  }
+}
+
+@media (max-width: 1180px) {
+  .hero-layers {
+    display: none;
+  }
+}
+
+@media (max-width: 980px) {
+  .hero-main {
+    grid-template-columns: 1fr;
+    gap: 32px;
+    padding-bottom: 40px;
+  }
+
+  .hero-main .auth-card {
+    justify-self: stretch;
+    max-width: none;
+  }
+
+  .hero-hud {
+    display: none;
+  }
+
+  .hero-vignette {
+    background:
+      linear-gradient(0deg, rgba(5, 12, 11, 0.9) 0%, rgba(5, 12, 11, 0.4) 60%, rgba(5, 12, 11, 0.6) 100%),
+      repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 1px, transparent 1px 3px);
+  }
+}
+
+@media (max-height: 820px) and (min-width: 981px) {
+  .hero-main {
+    padding-bottom: 40px;
+  }
+
+  .hero-hud {
+    display: none;
+  }
+}
