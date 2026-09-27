@@ -88,3 +88,7 @@ Copy `backend/.env.example` to `backend/.env`. Real environment variables overri
 | `VITE_API_BASE_URL` | `http://localhost:8000` | API origin baked into the frontend bundle. |
 
 API routes, auth, and raster uploads are in [backend/README.md](backend/README.md). The challenge pipeline is in [ai/README.md](ai/README.md).
+
+## License
+
+© 2026 Geobelic Team. All rights reserved. See [LICENSE](LICENSE).
