@@ -1,17 +1,18 @@
+import logging
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from pydantic import BaseModel, BeforeValidator, Field, StringConstraints, model_validator
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from pydantic import BaseModel, BeforeValidator, Field, StringConstraints, ValidationError, model_validator
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.exc import DataError, InternalError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.db import get_db
-from app.models import Project, Raster, User
-from app.routers.process_tif import ProcessTifResponse, store_uploaded_tiff, tile_url
+from app.models import Annotation, Project, Raster, User
+from app.routers.process_tif import ProcessTifResponse, tile_url
 from app.security import current_user
 from app.services.annotations import (
     UnplaceableRasterError,
@@ -20,11 +21,16 @@ from app.services.annotations import (
     feature_by_id,
     feature_collection,
     features_by_project,
+    insert_annotations,
 )
+from app.services.cvat_annotations import items_on_raster
+from app.services.mosaic import store_project_imagery
 from app.services.route import StartInsideObstacle, plan_route as plan_walking_route
-from app.services.tif import StoredRaster, remove_raster
+from app.services.tif import RasterError, StoredRaster, remove_raster
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+logger = logging.getLogger(__name__)
+ANNOTATION_BATCH = 2000
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 Coordinate = Annotated[float, Field(allow_inf_nan=False)]
@@ -212,7 +218,108 @@ def update_project(
     return _projects_out(request, db, [project])[0]
 
 
-def _save_raster(db: Session, project: Project, stored: StoredRaster) -> Raster:
+@router.delete("/{project_id}", status_code=204, response_model=None)
+def delete_project(project: Project = Depends(owned_project), db: Session = Depends(get_db)) -> Response:
+    raster_ids = list(db.scalars(select(Raster.id).where(Raster.project_id == project.id)))
+    db.delete(project)
+    db.commit()
+    for raster_id in raster_ids:
+        remove_raster(raster_id)
+    return Response(status_code=204)
+
+
+def _annotation_bodies(items: list[dict[str, Any]]) -> list[AnnotationCreate]:
+    """Pixel shapes, as the same annotations `POST .../annotations` accepts.
+
+    A shape with an unusable attribute is kept without its attributes; one with unusable geometry is skipped.
+    """
+    bodies: list[AnnotationCreate] = []
+    for item in items:
+        points = [(x, y) for x, y in item["points"]]
+        if item["shape"] == "rectangle":
+            xs = [x for x, _ in points]
+            ys = [y for _, y in points]
+            shape: dict[str, Any] = {"box": {"xtl": min(xs), "ytl": min(ys), "xbr": max(xs), "ybr": max(ys)}}
+        else:
+            shape = {"rings": points}
+        attributes = {key: value for key, value in (item.get("attributes") or {}).items() if value != ""}
+        for candidate in (attributes, {}):
+            try:
+                bodies.append(AnnotationCreate(label=item["label"], **shape, **candidate))
+                break
+            except ValidationError:
+                continue
+        else:
+            logger.warning("Skipped %s %s: invalid shape.", item["label"], item.get("id"))
+    return bodies
+
+
+def store_catalog_annotations(
+    db: Session, project: Project, raster: Raster, items: list[dict[str, Any]] | None = None
+) -> int:
+    """Replace the project's annotations with `items`, or with the catalog shapes on `raster`.
+
+    `items` are already in this raster's pixels. None looks them up from annotations.xml.
+    Keeps the existing annotations when there is nothing to store.
+    """
+    if items is None:
+        items = items_on_raster(raster.transform, raster.crs_wkt, raster.width, raster.height, raster.bounds_epsg32635)
+    bodies = _annotation_bodies(items)
+    if not bodies:
+        return 0
+    if raster.srid is None:
+        logger.warning("Raster %s has no EPSG code; its %d annotations were not stored.", raster.id, len(bodies))
+        return 0
+    # The raster's annotations describe the project now; the previous raster's would be duplicates.
+    db.execute(delete(Annotation).where(Annotation.project_id == project.id))
+    stored = 0
+    for start in range(0, len(bodies), ANNOTATION_BATCH):
+        stored += _store_annotation_batch(db, project.id, raster, bodies[start : start + ANNOTATION_BATCH])
+    return stored
+
+
+def _annotation_spec(body: AnnotationCreate) -> dict[str, Any]:
+    return {
+        "label": body.label,
+        "shape": body.shape,
+        "rings": body.pixel_rings(),
+        "box": body.box.model_dump() if body.box else None,
+        "attributes": body.model_dump(),
+    }
+
+
+def _store_annotation_batch(db: Session, project_id: int, raster: Raster, bodies: list[AnnotationCreate]) -> int:
+    """One insert for the batch. A geometry PostGIS rejects is stored alone so the rest still land."""
+    specs = [_annotation_spec(body) for body in bodies]
+    try:
+        with db.begin_nested():
+            insert_annotations(db, project_id, raster, specs)
+        return len(bodies)
+    except (DataError, InternalError):
+        logger.warning("Annotation batch of %d failed; retrying each shape.", len(bodies))
+    stored = 0
+    for spec in specs:
+        try:
+            with db.begin_nested():
+                create_annotation(
+                    db,
+                    project_id,
+                    raster,
+                    label=spec["label"],
+                    shape=spec["shape"],
+                    rings=spec["rings"],
+                    box=spec["box"],
+                    attributes=spec["attributes"],
+                )
+            stored += 1
+        except (DataError, InternalError):
+            logger.warning("Skipped a %s annotation PostGIS could not place on raster %s.", spec["label"], raster.id)
+    return stored
+
+
+def _save_raster(
+    db: Session, project: Project, stored: StoredRaster, items: list[dict[str, Any]] | None = None
+) -> Raster:
     raster = Raster(
         id=stored.id,
         project_id=project.id,
@@ -226,6 +333,8 @@ def _save_raster(db: Session, project: Project, stored: StoredRaster) -> Raster:
         maxzoom=stored.maxzoom,
     )
     db.add(raster)
+    db.flush()
+    store_catalog_annotations(db, project, raster, items)
     project.updated_at = func.now()
     db.commit()
     return raster
@@ -238,9 +347,12 @@ async def upload_raster(
     project: Project = Depends(owned_project),
     db: Session = Depends(get_db),
 ) -> RasterOut:
-    stored = await store_uploaded_tiff(file)
     try:
-        raster = await run_in_threadpool(_save_raster, db, project, stored)
+        stored, items = await store_project_imagery(file)
+    except RasterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        raster = await run_in_threadpool(_save_raster, db, project, stored, items)
     except BaseException:
         remove_raster(stored.id)
         raise

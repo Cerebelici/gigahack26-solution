@@ -1,7 +1,7 @@
 import math
 
 import pytest
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from app.services.route import StartInsideObstacle, plan_route
@@ -126,3 +126,40 @@ def test_target_sealed_off_by_obstacles_is_unreachable():
     assert plan.unreachable == (target,)
     assert plan.length_m == 0
     assert list(plan.route.coords) == pytest.approx([start, start])
+
+
+
+# Row axes of the example tile siret3_r021_c012 (EPSG:32635, mm). Before planning around the start,
+# pyvisgraph's float tolerances let edges cut through these rows and 7 of the 9 targets came back unreachable.
+EXAMPLE_ROWS = [
+    [(629657.6, 5220146.397), (629656.845, 5220147.2)], [(629657.6, 5220142.23), (629653.573, 5220147.2)],
+    [(629657.6, 5220137.393), (629650.007, 5220147.2)], [(629657.6, 5220132.98), (629646.565, 5220147.2)],
+    [(629657.6, 5220127.963), (629642.748, 5220147.2)], [(629657.6, 5220123.22), (629639.27, 5220147.2)],
+    [(629657.6, 5220118.59), (629635.627, 5220147.2)], [(629657.6, 5220113.815), (629631.627, 5220147.2)],
+    [(629657.6, 5220109.285), (629628.11, 5220147.2)], [(629657.6, 5220103.05), (629623.485, 5220147.2)],
+    [(629657.6, 5220097.055), (629618.978, 5220147.2)], [(629655.252, 5220096), (629615.845, 5220147.2)],
+    [(629651.807, 5220096), (629612.517, 5220147.2)], [(629648.175, 5220096), (629609.198, 5220147.2)],
+    [(629644.907, 5220096), (629606.4, 5220146.428)], [(629641.575, 5220096), (629606.4, 5220142.118)],
+    [(629638.147, 5220096), (629606.4, 5220137.657)], [(629634.345, 5220096), (629606.4, 5220132.57)],
+    [(629630.625, 5220096), (629606.4, 5220127.645)], [(629627, 5220096), (629606.4, 5220123.058)],
+    [(629623.575, 5220096), (629606.4, 5220118.565)], [(629620.235, 5220096), (629606.4, 5220113.777)],
+    [(629616.47, 5220096), (629606.4, 5220109.375)], [(629613.188, 5220096), (629606.4, 5220105.07)],
+    [(629610.095, 5220096), (629606.4, 5220100.803)],
+]
+
+
+def test_buffered_rows_at_utm_coordinates_do_not_leak_through_the_visibility_graph():
+    lines = [LineString(row) for row in EXAMPLE_ROWS]
+    obstacles = [list(line.buffer(0.6, cap_style="flat").exterior.coords) for line in lines]
+    start = (629603.8, 5220149.8)
+    targets = [line.interpolate(0.5, normalized=True).coords[0] for line in lines[::3]]
+
+    plan = plan_route(obstacles, start, targets)
+
+    assert plan.unreachable == ()
+    assert list(plan.route.coords)[0] == pytest.approx(start)
+    assert list(plan.route.coords)[-1] == pytest.approx(start)
+    walls = unary_union([Polygon(ring).buffer(-1e-3) for ring in obstacles])
+    assert not plan.route.intersects(walls)
+    for target in targets:
+        assert plan.route.distance(Point(target)) <= 2.0

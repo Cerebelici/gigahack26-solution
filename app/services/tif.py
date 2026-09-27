@@ -84,7 +84,10 @@ def _needs_cog(src: DatasetReader) -> bool:
 def _jpeg_compatible(src: DatasetReader) -> bool:
     if src.nodata is not None or set(src.dtypes) != {"uint8"}:
         return False
-    return src.count == 3 or (src.count == 4 and src.colorinterp[3] == ColorInterp.alpha)
+    # Alpha marks the empty space between mosaicked tiles. JPEG would drop it and paint those gaps black.
+    if any(band == ColorInterp.alpha for band in src.colorinterp):
+        return False
+    return src.count == 3
 
 
 def _bounds(src: DatasetReader, crs: str) -> Bounds:

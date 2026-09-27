@@ -8,7 +8,8 @@ reprojects to EPSG:32635, so the conversion never assumes a pixel size or a CRS.
 import json
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Double, Integer, Text, bindparam, func, select, text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Session
 
 from app.models import MAP_SRID, Annotation, Raster
@@ -67,6 +68,112 @@ def map_geometry(wkt: str, raster: Raster):
     # ST_Affine(g, a, b, d, e, xoff, yoff): x' = a*x + b*y + xoff, y' = d*x + e*y + yoff.
     in_raster_crs = func.ST_SetSRID(func.ST_Affine(func.ST_GeomFromText(wkt, 0), a, b, d, e, c, f), raster.srid)
     return func.ST_Transform(in_raster_crs, MAP_SRID)
+
+
+_INSERT_ANNOTATIONS = text("""
+INSERT INTO annotations (
+    project_id, raster_id, label, shape, pixel_rings, pixel_box, geom,
+    vineyard_id, row_id, row_structure, interrow_cover,
+    length_m, grapevine_count, area_m2, area_ha
+)
+SELECT
+    :project_id,
+    :raster_id,
+    label,
+    shape,
+    pixel_rings,
+    pixel_box,
+    ST_Transform(
+        ST_SetSRID(ST_Affine(ST_GeomFromText(wkt, 0), :a, :b, :d, :e, :c, :f), :srid),
+        :map_srid
+    ),
+    vineyard_id,
+    row_id,
+    row_structure,
+    interrow_cover,
+    length_m,
+    grapevine_count,
+    area_m2,
+    area_ha
+FROM unnest(
+    CAST(:labels AS text[]),
+    CAST(:shapes AS text[]),
+    CAST(:pixel_rings AS text[])::jsonb[],
+    CAST(:pixel_boxes AS text[])::jsonb[],
+    CAST(:wkts AS text[]),
+    CAST(:vineyard_ids AS text[]),
+    CAST(:row_ids AS text[]),
+    CAST(:row_structures AS text[]),
+    CAST(:interrow_covers AS text[]),
+    CAST(:lengths AS double precision[]),
+    CAST(:grapevine_counts AS integer[]),
+    CAST(:areas_m2 AS double precision[]),
+    CAST(:areas_ha AS double precision[])
+) AS t(
+    label, shape, pixel_rings, pixel_box, wkt,
+    vineyard_id, row_id, row_structure, interrow_cover,
+    length_m, grapevine_count, area_m2, area_ha
+)
+""").bindparams(
+    bindparam("labels", type_=ARRAY(Text())),
+    bindparam("shapes", type_=ARRAY(Text())),
+    bindparam("pixel_rings", type_=ARRAY(Text())),
+    bindparam("pixel_boxes", type_=ARRAY(Text())),
+    bindparam("wkts", type_=ARRAY(Text())),
+    bindparam("vineyard_ids", type_=ARRAY(Text())),
+    bindparam("row_ids", type_=ARRAY(Text())),
+    bindparam("row_structures", type_=ARRAY(Text())),
+    bindparam("interrow_covers", type_=ARRAY(Text())),
+    bindparam("lengths", type_=ARRAY(Double())),
+    bindparam("grapevine_counts", type_=ARRAY(Integer())),
+    bindparam("areas_m2", type_=ARRAY(Double())),
+    bindparam("areas_ha", type_=ARRAY(Double())),
+)
+
+
+def insert_annotations(db: Session, project_id: int, raster: Raster, specs: list[dict[str, Any]]) -> None:
+    """Insert every spec in one statement. `rings` are pixel rings; `attributes` holds the optional fields."""
+    if not specs:
+        return
+    a, b, c, d, e, f = raster.transform
+    columns: dict[str, list[Any]] = {key: [] for key in ("label", "shape", "rings", "box", "wkt", *ATTRIBUTES)}
+    for spec in specs:
+        attributes = spec["attributes"]
+        columns["label"].append(spec["label"])
+        columns["shape"].append(spec["shape"])
+        columns["rings"].append(json.dumps(spec["rings"]))
+        columns["box"].append(json.dumps(spec["box"]) if spec["box"] is not None else None)
+        columns["wkt"].append(pixel_wkt(spec["shape"], spec["rings"]))
+        for key in ATTRIBUTES:
+            columns[key].append(attributes.get(key))
+    db.execute(
+        _INSERT_ANNOTATIONS,
+        {
+            "project_id": project_id,
+            "raster_id": raster.id,
+            "a": a,
+            "b": b,
+            "c": c,
+            "d": d,
+            "e": e,
+            "f": f,
+            "srid": raster.srid,
+            "map_srid": MAP_SRID,
+            "labels": columns["label"],
+            "shapes": columns["shape"],
+            "pixel_rings": columns["rings"],
+            "pixel_boxes": columns["box"],
+            "wkts": columns["wkt"],
+            "vineyard_ids": columns["vineyard_id"],
+            "row_ids": columns["row_id"],
+            "row_structures": columns["row_structure"],
+            "interrow_covers": columns["interrow_cover"],
+            "lengths": columns["length_m"],
+            "grapevine_counts": columns["grapevine_count"],
+            "areas_m2": columns["area_m2"],
+            "areas_ha": columns["area_ha"],
+        },
+    )
 
 
 def create_annotation(

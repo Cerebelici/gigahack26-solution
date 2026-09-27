@@ -17,7 +17,7 @@ Read from the environment, then from `backend/.env` (real environment variables 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://localhost:5432/gigahack` | PostgreSQL with the PostGIS extension. `postgresql://` URLs are used through psycopg 3. |
+| `DATABASE_URL` | `postgresql://localhost:5432/gigahack` | PostgreSQL with the PostGIS extension. `postgresql://` URLs are used through psycopg 3. A Supabase URL must use the session pooler (`aws-<n>-<region>.pooler.supabase.com:5432`, user `postgres.<project-ref>`) on an IPv4 network; the direct `db.<ref>` host is IPv6-only. Supabase connections require SSL. |
 | `JWT_SECRET` | random per process | Signs login tokens. Set it, or every restart logs everyone out. |
 | `JWT_TTL_HOURS` | `24` | Token lifetime. |
 | `UPLOAD_DIR` | `../uploads` (next to this repo) | Where uploaded rasters and their COGs are stored, one folder per raster id. Keep it outside the repo. |
@@ -96,6 +96,7 @@ endpoints return `404` for projects the caller does not own. Validation errors a
 - 🔒 `GET /projects` → project[] (most recently updated first)
 - 🔒 `GET /projects/{id}` → project
 - 🔒 `PATCH /projects/{id}` `{ name }` → project
+- 🔒 `DELETE /projects/{id}` → `204` with an empty body. Removes the project, its annotations, and the imagery files. `404` for a project the caller does not own.
 
 ```json
 {
@@ -113,9 +114,21 @@ endpoints return `404` for projects the caller does not own. Validation errors a
 
 ### Raster upload
 
-🔒 `POST /projects/{id}/raster`, `multipart/form-data` with the TIFF in `file` → the raster object above.
-It becomes the project's current raster. Stored in `UPLOAD_DIR/<raster id>/`, converted to a COG with
-overviews when needed, exactly like `POST /process-tif`.
+🔒 `POST /projects/{id}/raster`, `multipart/form-data` with the file in `file` → the raster object above.
+Send one GeoTIFF, or a `.zip` of GeoTIFFs plus the CVAT XML files for those tiles. A zip is mosaicked by
+each TIFF's coordinates into one orthophoto: neighbouring tiles meet on the ground, and the gap between
+them stays transparent. The upload becomes the project's current raster, stored in `UPLOAD_DIR/<raster id>/`
+and converted to a COG with overviews. Zooming still requests `{z}/{x}/{y}` tiles of that one image.
+
+Shapes from the zip's XML are stored as the project's annotations, in the mosaic's pixel grid, replacing the
+previous ones. An XML `<image name>` matches a TIFF by file name (`left.tif`, or `tiles/left.tif`). A single
+GeoTIFF still takes the shapes in `annotations.xml` that lie on it, placed by where their tile
+(`siret3_rNNN_cNNN.tif`) sits on the challenge grid. A shape with an unusable attribute is stored without its
+attributes; one with unusable geometry is skipped and logged. An upload with no shapes leaves the existing
+annotations alone.
+
+Projects uploaded before this have none. Fill them once with `python -m app.backfill_annotations`; it only
+touches projects without annotations.
 
 ### Annotations
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 from pyvisgraph import Point, VisGraph
 from shapely import union_all
+from shapely.affinity import translate
 from shapely.geometry import LineString, Point as ShapelyPoint, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import nearest_points
@@ -51,6 +52,26 @@ class _Candidate:
 
 
 def plan_route(
+    obstacles: Sequence[Sequence[Sequence[float]]],
+    start: Sequence[float],
+    targets: Sequence[Sequence[float]],
+) -> RoutePlan:
+    # pyvisgraph compares floats with fixed tolerances. At UTM magnitudes (~10^6 m) its visibility test
+    # lets edges cut through thin obstacles, so the walk is planned around the start and moved back.
+    ox, oy = _coordinate(start)
+    originals = [_coordinate(target) for target in targets]
+    local_targets = [(x - ox, y - oy) for x, y in originals]
+    local_obstacles = [[(float(p[0]) - ox, float(p[1]) - oy) for p in ring] for ring in obstacles]
+    plan = _plan_local(local_obstacles, (0.0, 0.0), local_targets)
+    by_local = dict(zip(local_targets, originals))
+    return RoutePlan(
+        route=translate(plan.route, ox, oy),
+        length_m=plan.length_m,
+        unreachable=tuple(by_local[point] for point in plan.unreachable),
+    )
+
+
+def _plan_local(
     obstacles: Sequence[Sequence[Sequence[float]]],
     start: Sequence[float],
     targets: Sequence[Sequence[float]],
