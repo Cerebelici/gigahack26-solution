@@ -1,0 +1,17 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+rasterio>=1.4
+numpy>=1.24
+shapely>=2.0,<3
+pyvisgraph==0.2.1
+# pyvisgraph 0.2.1 imports tqdm but does not declare the dependency.
+tqdm>=4.66,<5
+ortools>=9.12,<10
+sqlalchemy>=2.1
+psycopg[binary]>=3.2
+geoalchemy2>=0.15
+argon2-cffi>=23.1
+pyjwt>=2.8
+python-dotenv>=1.0
+certifi>=2024.8

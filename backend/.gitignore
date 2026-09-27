@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments
+.venv/
+venv/
+env/
+runner/
+.env
+.env.*
+!.env.example
+
+# Uploaded rasters and generated COGs (the default UPLOAD_DIR is ../uploads, outside this repo)
+data/
+uploads/
+*.tif
+*.tiff
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
