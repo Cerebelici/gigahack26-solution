@@ -505,19 +505,65 @@ def test_adjacent_zip_tiles_share_an_edge(token, project, upload_dir):
         assert int(ds.read(4, window=Window(size, mid, 1, 1))[0, 0]) == 255
 
 
-# A CVAT export re-encodes each tile as a PNG keeping the ".tif" name, prefixed with its frame id.
-CELL_WEST, CELL_NORTH = 629504.0, 5220300.8  # top-left of siret3_r018_c010
-CELL_SIZE_M = 51.2
+def plain_tiff(color: tuple[int, int, int], size: int = 32) -> bytes:
+    data = np.empty((3, size, size), dtype=np.uint8)
+    data[0], data[1], data[2] = color
+    with MemoryFile() as mem:
+        with mem.open(driver="GTiff", width=size, height=size, count=3, dtype="uint8") as dst:
+            dst.write(data)
+        return mem.read()
 
-CVAT_EXPORT_XML = """<?xml version="1.0" encoding="utf-8"?>
-<annotations>
-  <image name="6436_siret3_r018_c010.tif" width="64" height="64">
-    <polygon label="vineyard" points="0,0;32,0;32,32">
-      <attribute name="vineyard_id">CVAT</attribute>
-    </polygon>
-  </image>
-</annotations>
-"""
+
+def test_cvat_export_without_geotags_uses_the_challenge_grid(token, project, upload_dir):
+    # r005_c004: top-left (628992 + 4 * 51.2, 5221222.4 - 5 * 51.2), a 51.2 m square.
+    west, north, tile_m = 629196.8, 5220966.4, 51.2
+    size = 32
+    pixel = tile_m / size
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+    <annotations><image name="siret3_r005_c004.tif" width="32" height="32">
+      <polygon label="vineyard" points="2,2;8,2;8,8"><attribute name="vineyard_id">GRID</attribute></polygon>
+    </image></annotations>"""
+    res = upload_zip(
+        token,
+        project["id"],
+        zip_bytes({"images/6436_siret3_r005_c004.tif": plain_tiff(LEFT_COLOR, size), "annotations.xml": xml.encode()}),
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["boundsEpsg32635"] == pytest.approx(
+        [west, north - tile_m, west + tile_m, north], abs=1e-3
+    )
+    features = client.get(f"/projects/{project['id']}/annotations", headers=auth(token)).json()["features"]
+    assert len(features) == 1
+    assert features[0]["properties"]["vineyard_id"] == "GRID"
+    assert features[0]["geometry"]["coordinates"][0] == [
+        pytest.approx(point, abs=1e-3)
+        for point in [
+            [west + 2 * pixel, north - 2 * pixel],
+            [west + 8 * pixel, north - 2 * pixel],
+            [west + 8 * pixel, north - 8 * pixel],
+            [west + 2 * pixel, north - 2 * pixel],
+        ]
+    ]
+    with rasterio.open(upload_dir / res.json()["id"] / "raster.tif") as ds:
+        assert tuple(int(v) for v in ds.read(window=Window(4, 4, 1, 1))[:3, 0, 0]) == LEFT_COLOR
+
+
+def test_named_geotiff_keeps_its_own_position(token, project):
+    west, north = 1000.0, 2000.0
+    res = upload_zip(
+        token,
+        project["id"],
+        zip_bytes({"siret3_r005_c004.tif": solid_geotiff(west, north, LEFT_COLOR, size=32, pixel=1)}),
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["boundsEpsg32635"] == pytest.approx([west, north - 32, west + 32, north], abs=1e-3)
+
+
+def test_plain_tiff_without_a_challenge_name_is_rejected(token, project, upload_dir):
+    res = upload_zip(token, project["id"], zip_bytes({"notes.tif": plain_tiff(LEFT_COLOR)}))
+    assert res.status_code == 400
+    assert res.json()["detail"] == "notes.tif has no georeferencing (CRS and geotransform)."
+    assert not any(upload_dir.iterdir())
 
 
 def solid_png(color: tuple[int, int, int], size: int = 64) -> bytes:
@@ -532,6 +578,12 @@ def solid_png(color: tuple[int, int, int], size: int = 64) -> bytes:
 
 
 def test_cvat_export_tiles_are_placed_by_their_grid_name(token, project, upload_dir):
+    # A CVAT export re-encodes each tile as a PNG keeping the ".tif" name, prefixed with its frame id.
+    west, north, tile_m = 629504.0, 5220300.8, 51.2  # top-left of siret3_r018_c010
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+    <annotations><image name="6436_siret3_r018_c010.tif" width="64" height="64">
+      <polygon label="vineyard" points="0,0;32,0;32,32"><attribute name="vineyard_id">CVAT</attribute></polygon>
+    </image></annotations>"""
     res = upload_zip(
         token,
         project["id"],
@@ -539,14 +591,14 @@ def test_cvat_export_tiles_are_placed_by_their_grid_name(token, project, upload_
             {
                 "images/6436_siret3_r018_c010.tif": solid_png(LEFT_COLOR),
                 "images/6437_siret3_r018_c011.tif": solid_png(RIGHT_COLOR),
-                "annotations.xml": CVAT_EXPORT_XML.encode(),
+                "annotations.xml": xml.encode(),
             }
         ),
     )
     assert res.status_code == 200, res.text
     raster = res.json()
     assert raster["boundsEpsg32635"] == pytest.approx(
-        [CELL_WEST, CELL_NORTH - CELL_SIZE_M, CELL_WEST + 2 * CELL_SIZE_M, CELL_NORTH], abs=1e-3
+        [west, north - tile_m, west + 2 * tile_m, north], abs=1e-3
     )
     with rasterio.open(upload_dir / raster["id"] / "raster.tif") as ds:
         assert (ds.width, ds.height) == (128, 64)
@@ -555,14 +607,7 @@ def test_cvat_export_tiles_are_placed_by_their_grid_name(token, project, upload_
 
     features = client.get(f"/projects/{project['id']}/annotations", headers=auth(token)).json()["features"]
     assert [feature["properties"]["vineyard_id"] for feature in features] == ["CVAT"]
-    assert features[0]["geometry"]["coordinates"][0][0] == pytest.approx([CELL_WEST, CELL_NORTH], abs=1e-3)
-
-
-def test_tile_with_neither_georeferencing_nor_a_grid_name_is_rejected(token, project, upload_dir):
-    res = upload_zip(token, project["id"], zip_bytes({"plain.tif": solid_png(LEFT_COLOR)}))
-    assert res.status_code == 400
-    assert res.json()["detail"] == "plain.tif has no georeferencing (CRS and geotransform)."
-    assert not any(upload_dir.iterdir())
+    assert features[0]["geometry"]["coordinates"][0][0] == pytest.approx([west, north], abs=1e-3)
 
 
 def test_zip_without_a_geotiff_is_rejected(token, project, upload_dir):

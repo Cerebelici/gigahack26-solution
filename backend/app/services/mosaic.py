@@ -29,7 +29,7 @@ from rasterio.windows import Window
 from starlette.concurrency import run_in_threadpool
 
 from app.services import tif
-from app.services.cvat_annotations import TILE_SIZE_M, UTM, file_basename, parse_annotations, tile_origin
+from app.services.cvat_annotations import TILE_SIZE_M, UTM, image_keys, parse_annotations, tile_origin
 from app.services.tif import TIFF_MAGIC_SIZE, RasterError, StoredRaster, is_tiff
 
 
@@ -471,18 +471,31 @@ def _placed_items(tiles: list[_Tile], xml_paths: list[Path], stored: StoredRaste
             logger.warning("Skipped annotation file %s: it is not usable CVAT XML.", path.name)
             continue
         for image_name, image in images.items():
-            by_name.setdefault(file_basename(image_name).lower(), []).extend(image["items"])
+            for key in image_keys(image_name):
+                by_name.setdefault(key, []).extend(image["items"])
     mosaic = Affine(*stored.transform)
     mosaic_crs = CRS.from_wkt(stored.crs_wkt)
     inverse = ~mosaic
     placed: list[dict[str, Any]] = []
     for tile in tiles:
-        for item in by_name.get(tile.name.lower(), []):
-            points = _to_mosaic_pixels(item["points"], tile, inverse, mosaic_crs)
-            if points is None:
-                continue
-            placed.append({**item, "points": points})
+        seen: set[tuple[Any, ...]] = set()
+        for key in image_keys(tile.name):
+            for item in by_name.get(key, []):
+                identity = _item_identity(item)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                points = _to_mosaic_pixels(item["points"], tile, inverse, mosaic_crs)
+                if points is None:
+                    continue
+                placed.append({**item, "points": points})
     return placed
+
+
+def _item_identity(item: dict[str, Any]) -> tuple[Any, ...]:
+    points = tuple(tuple(point) for point in item["points"])
+    attributes = tuple(sorted((item.get("attributes") or {}).items()))
+    return (item.get("id"), item.get("label"), item.get("shape"), points, attributes)
 
 
 def _to_mosaic_pixels(

@@ -42,11 +42,25 @@ def catalog() -> dict[str, dict[str, Any]] | None:
 
 def tile_origin(name: str) -> tuple[float, float] | None:
     """EPSG:32635 top-left corner of a challenge tile, from its file name."""
-    match = TILE_NAME.search(name)
+    match = TILE_NAME.search(file_basename(name))
     if not match:
         return None
     row, col = int(match[1]), int(match[2])
     return GRID_ORIGIN[0] + col * TILE_SIZE_M, GRID_ORIGIN[1] - row * TILE_SIZE_M
+
+
+def image_keys(name: str) -> set[str]:
+    """Basenames that refer to the same image.
+
+    A CVAT export prefixes the image id, so `6436_siret3_r005_c004.tif` is the tile
+    `siret3_r005_c004.tif` named in the XML.
+    """
+    base = file_basename(name).lower()
+    keys = {base}
+    match = TILE_NAME.search(base)
+    if match:
+        keys.add(match.group(0).lower())
+    return keys
 
 
 def items_on_raster(
