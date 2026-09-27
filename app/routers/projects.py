@@ -46,13 +46,16 @@ class ProjectWrite(BaseModel):
 RasterOut = ProcessTifResponse
 
 
-class ProjectOut(BaseModel):
+class ProjectSummary(BaseModel):
     id: int
     name: str
     raster: RasterOut | None
-    features: dict[str, Any]
     createdAt: datetime
     updatedAt: datetime
+
+
+class ProjectOut(ProjectSummary):
+    features: dict[str, Any]
 
 
 class PixelBox(BaseModel):
@@ -169,16 +172,14 @@ def _raster_out(request: Request, raster: Raster) -> RasterOut:
     )
 
 
-def _projects_out(request: Request, db: Session, projects: list[Project]) -> list[ProjectOut]:
+def _summaries(request: Request, db: Session, projects: list[Project]) -> list[ProjectSummary]:
     ids = [project.id for project in projects]
     rasters = _latest_rasters(db, ids)
-    features = features_by_project(db, ids)
     return [
-        ProjectOut(
+        ProjectSummary(
             id=project.id,
             name=project.name,
             raster=_raster_out(request, rasters[project.id]) if project.id in rasters else None,
-            features=feature_collection(features[project.id]),
             createdAt=project.created_at,
             updatedAt=project.updated_at,
         )
@@ -186,36 +187,44 @@ def _projects_out(request: Request, db: Session, projects: list[Project]) -> lis
     ]
 
 
+def _project_out(request: Request, db: Session, project: Project) -> ProjectOut:
+    summary = _summaries(request, db, [project])[0]
+    features = features_by_project(db, [project.id])[project.id]
+    return ProjectOut(**summary.model_dump(), features=feature_collection(features))
+
+
 @router.post("", status_code=201)
 def create_project(
     body: ProjectWrite, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)
-) -> ProjectOut:
+) -> ProjectSummary:
     project = Project(owner_id=user.id, name=body.name)
     db.add(project)
     db.commit()
-    return _projects_out(request, db, [project])[0]
+    return _summaries(request, db, [project])[0]
 
 
 @router.get("")
-def list_projects(request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[ProjectOut]:
+def list_projects(
+    request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> list[ProjectSummary]:
     projects = list(
         db.scalars(select(Project).where(Project.owner_id == user.id).order_by(Project.updated_at.desc(), Project.id))
     )
-    return _projects_out(request, db, projects)
+    return _summaries(request, db, projects)
 
 
 @router.get("/{project_id}")
 def get_project(request: Request, project: Project = Depends(owned_project), db: Session = Depends(get_db)) -> ProjectOut:
-    return _projects_out(request, db, [project])[0]
+    return _project_out(request, db, project)
 
 
 @router.patch("/{project_id}")
 def update_project(
     body: ProjectWrite, request: Request, project: Project = Depends(owned_project), db: Session = Depends(get_db)
-) -> ProjectOut:
+) -> ProjectSummary:
     project.name = body.name
     db.commit()
-    return _projects_out(request, db, [project])[0]
+    return _summaries(request, db, [project])[0]
 
 
 @router.delete("/{project_id}", status_code=204, response_model=None)
