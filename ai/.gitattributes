@@ -1,0 +1,1 @@
+assets/04_source/*.tif filter=lfs diff=lfs merge=lfs -text

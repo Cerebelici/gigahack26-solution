@@ -1,0 +1,53 @@
+# Operating System & IDE
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+.venv/
+env/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Training Dataset & Runs (Large Files - Do NOT commit)
+dataset/
+dataset_new/
+dataset_old/
+dataset_unified/
+runs/
+models/
+*.cache
+*.zip
+
+# Ultralytics downloads and training output.
+waste/data/
+waste/runs/
+waste/predictions/
+waste/marcaj/
+
+# Heavy Imagery & Mosaics (>100MB / forbidden in repo)
+assets/01_tiles/
+assets/04_source/*
+assets/04_source/siret3_source_orthomosaic_EPSG4326.tifs
+assets/04_source/siret3_source_orthomosaic_EPSG4326.tif
+
+# Pretrained base weights (keep only the fine-tuned detectors)
+*.pt
+*.pth
+weights/
+
+
+# Local temporary dumps
+output/
+exports/
+annotations*.xml
+coordinates*.json
+
+yolo26l-seg.pt
+yolo26n-seg.pt
+yolo26s-seg.pt
