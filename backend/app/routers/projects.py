@@ -121,15 +121,17 @@ class AnnotationCreate(BaseModel):
 
 
 class RouteRequest(BaseModel):
-    """Obstacle rings, the start, and the targets, in EPSG:32635 metres.
+    """Obstacle rings, canopy rings, the start, and the targets, in EPSG:32635 metres.
 
     Each obstacle ring is a solid polygon. A two-point row is not a polygon.
+    Canopy rings are vine footprints the walk must not cross.
     """
 
     routeType: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
     obstacles: list[list[Point]]
     start: Point
     targets: list[Point]
+    canopies: list[list[Point]] = Field(default_factory=list)
 
 
 class RouteLine(BaseModel):
@@ -406,7 +408,7 @@ def add_annotation(
 def plan_route(body: RouteRequest, project: Project = Depends(owned_project)) -> RouteResponse:
     """Closed walk in EPSG:32635 metres that visits every reachable target and returns to the start."""
     try:
-        planned = plan_walking_route(body.obstacles, body.start, body.targets)
+        planned = plan_walking_route(body.obstacles, body.start, body.targets, body.canopies)
     except StartInsideObstacle as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RouteResponse(
