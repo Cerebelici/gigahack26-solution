@@ -28,7 +28,7 @@ from rasterio.windows import Window
 from starlette.concurrency import run_in_threadpool
 
 from app.services import tif
-from app.services.cvat_annotations import file_basename, parse_annotations
+from app.services.cvat_annotations import TILE_SIZE_M, image_keys, parse_annotations, tile_origin
 from app.services.tif import TIFF_MAGIC_SIZE, RasterError, StoredRaster, is_tiff
 
 
@@ -226,13 +226,39 @@ def _open_tiles(paths: list[Path]) -> list[_Tile]:
                 raise RasterError(f"Could not read {path.name} as a GeoTIFF.") from exc
             if dataset.crs is None or dataset.transform.is_identity:
                 dataset.close()
-                raise RasterError(f"{path.name} has no georeferencing (CRS and geotransform).")
+                if not _assign_challenge_grid(path):
+                    raise RasterError(f"{path.name} has no georeferencing (CRS and geotransform).")
+                dataset = rasterio.open(path)
             tiles.append(_Tile(name=path.name, dataset=dataset))
     except Exception:
         for tile in tiles:
             tile.dataset.close()
         raise
     return tiles
+
+
+def _assign_challenge_grid(path: Path) -> bool:
+    """Write the challenge-grid position into a tile CVAT saved without GeoTIFF tags.
+
+    The tile is a 51.2 m square. Its file name, even with a CVAT image-id prefix, says which square.
+    """
+    origin = tile_origin(path.name)
+    if origin is None:
+        return False
+    west, north = origin
+    try:
+        with rasterio.open(path, "r+") as dataset:
+            if dataset.width < 1 or dataset.height < 1:
+                return False
+            pixel_x = TILE_SIZE_M / dataset.width
+            pixel_y = TILE_SIZE_M / dataset.height
+            dataset.crs = CRS.from_epsg(32635)
+            dataset.transform = Affine(pixel_x, 0.0, west, 0.0, -pixel_y, north)
+    except rasterio.RasterioError:
+        logger.warning("Could not write a challenge-grid position into %s.", path.name)
+        return False
+    logger.info("Placed %s on the challenge grid at (%.3f, %.3f).", path.name, west, north)
+    return True
 
 
 def _write_mosaic(tiles: list[_Tile], dest: Path) -> None:
@@ -466,18 +492,31 @@ def _placed_items(tiles: list[_Tile], xml_paths: list[Path], stored: StoredRaste
             logger.warning("Skipped annotation file %s: it is not usable CVAT XML.", path.name)
             continue
         for image_name, image in images.items():
-            by_name.setdefault(file_basename(image_name).lower(), []).extend(image["items"])
+            for key in image_keys(image_name):
+                by_name.setdefault(key, []).extend(image["items"])
     mosaic = Affine(*stored.transform)
     mosaic_crs = CRS.from_wkt(stored.crs_wkt)
     inverse = ~mosaic
     placed: list[dict[str, Any]] = []
     for tile in tiles:
-        for item in by_name.get(tile.name.lower(), []):
-            points = _to_mosaic_pixels(item["points"], tile, inverse, mosaic_crs)
-            if points is None:
-                continue
-            placed.append({**item, "points": points})
+        seen: set[tuple[Any, ...]] = set()
+        for key in image_keys(tile.name):
+            for item in by_name.get(key, []):
+                identity = _item_identity(item)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                points = _to_mosaic_pixels(item["points"], tile, inverse, mosaic_crs)
+                if points is None:
+                    continue
+                placed.append({**item, "points": points})
     return placed
+
+
+def _item_identity(item: dict[str, Any]) -> tuple[Any, ...]:
+    points = tuple(tuple(point) for point in item["points"])
+    attributes = tuple(sorted((item.get("attributes") or {}).items()))
+    return (item.get("id"), item.get("label"), item.get("shape"), points, attributes)
 
 
 def _to_mosaic_pixels(
