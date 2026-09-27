@@ -21,9 +21,13 @@ class ProcessTifResponse(BaseModel):
     maxzoom: int
 
 
+# Bumped when served tile pixels change. Browsers cache tiles as immutable.
+TILE_VERSION = "2"
+
+
 def tile_url(request: Request, raster_id: str) -> str:
     base_url = str(request.base_url).rstrip("/")
-    return f"{base_url}/tiles/{raster_id}/{{z}}/{{x}}/{{y}}.png"
+    return f"{base_url}/tiles/{raster_id}/{{z}}/{{x}}/{{y}}.png?v={TILE_VERSION}"
 
 
 async def store_uploaded_tiff(file: UploadFile | None) -> StoredRaster:

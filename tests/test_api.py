@@ -13,7 +13,6 @@ from sqlalchemy import text
 
 from app.main import app
 from app.services import cvat_annotations, tif
-from app.services.mosaic import SOURCE_BORDER_COLOR, source_border_px
 from tests.test_process_tif import (
     COLOR,
     PIXEL_M,
@@ -196,7 +195,7 @@ def test_raster_upload_is_stored_under_upload_dir_and_tiles(token, project, uplo
     assert res.status_code == 200, res.text
     raster = res.json()
     assert tif.RASTER_ID.fullmatch(raster["id"])
-    assert raster["tileUrl"] == f"http://testserver/tiles/{raster['id']}/{{z}}/{{x}}/{{y}}.png"
+    assert raster["tileUrl"] == f"http://testserver/tiles/{raster['id']}/{{z}}/{{x}}/{{y}}.png?v=2"
     assert raster["boundsEpsg32635"] == pytest.approx([UL_X, UL_Y - 300 * PIXEL_M, UL_X + 300 * PIXEL_M, UL_Y])
     assert raster["maxzoom"] == 22
     assert (upload_dir / raster["id"] / "raster.tif").is_file()
@@ -498,12 +497,9 @@ def test_adjacent_zip_tiles_share_an_edge(token, project, upload_dir):
     assert res.status_code == 200, res.text
     with rasterio.open(upload_dir / res.json()["id"] / "raster.tif") as ds:
         assert (ds.width, ds.height) == (size * 2, size)
-        border = source_border_px(size, size)
         mid = size // 2
-        assert tuple(int(v) for v in ds.read(window=Window(size - 1 - border, mid, 1, 1))[:3, 0, 0]) == LEFT_COLOR
-        assert tuple(int(v) for v in ds.read(window=Window(size + border, mid, 1, 1))[:3, 0, 0]) == RIGHT_COLOR
-        assert tuple(int(v) for v in ds.read(window=Window(size - 1, mid, 1, 1))[:3, 0, 0]) == SOURCE_BORDER_COLOR
-        assert tuple(int(v) for v in ds.read(window=Window(size, mid, 1, 1))[:3, 0, 0]) == SOURCE_BORDER_COLOR
+        assert tuple(int(v) for v in ds.read(window=Window(size - 1, mid, 1, 1))[:3, 0, 0]) == LEFT_COLOR
+        assert tuple(int(v) for v in ds.read(window=Window(size, mid, 1, 1))[:3, 0, 0]) == RIGHT_COLOR
         assert int(ds.read(4, window=Window(size - 1, mid, 1, 1))[0, 0]) == 255
         assert int(ds.read(4, window=Window(size, mid, 1, 1))[0, 0]) == 255
 

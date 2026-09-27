@@ -5,6 +5,9 @@ headlands and ground that is not an inter-row. A target inside a ring is moved t
 nearest point just outside it. It is left out when that point is more than 2 m away, or
 when every walk from the start enters an obstacle.
 
+Canopies are separate rings. The walk is planned around the row obstacles, then bent
+around any canopy it would otherwise cross. A stop it already reached stays within 2 m.
+
 A narrow gap between two parallel obstacles is an inter-row. Stops in that gap are
 placed on its centre line, and a walk that stays in the gap follows that middle.
 """
@@ -78,6 +81,7 @@ def plan_route(
     obstacles: Sequence[Sequence[Sequence[float]]],
     start: Sequence[float],
     targets: Sequence[Sequence[float]],
+    canopies: Sequence[Sequence[Sequence[float]]] = (),
 ) -> RoutePlan:
     # pyvisgraph compares floats with fixed tolerances. At UTM magnitudes (~10^6 m) its visibility test
     # lets edges cut through thin obstacles, so the walk is planned around the start and moved back.
@@ -85,7 +89,8 @@ def plan_route(
     originals = [_coordinate(target) for target in targets]
     local_targets = [(x - ox, y - oy) for x, y in originals]
     local_obstacles = [[(float(p[0]) - ox, float(p[1]) - oy) for p in ring] for ring in obstacles]
-    plan = _plan_local(local_obstacles, (0.0, 0.0), local_targets)
+    local_canopies = [[(float(p[0]) - ox, float(p[1]) - oy) for p in ring] for ring in canopies]
+    plan = _plan_local(local_obstacles, (0.0, 0.0), local_targets, local_canopies)
     by_local = dict(zip(local_targets, originals))
     return RoutePlan(
         route=translate(plan.route, ox, oy),
@@ -98,11 +103,18 @@ def _plan_local(
     obstacles: Sequence[Sequence[Sequence[float]]],
     start: Sequence[float],
     targets: Sequence[Sequence[float]],
+    canopies: Sequence[Sequence[Sequence[float]]] = (),
 ) -> RoutePlan:
     origin = _coordinate(start)
     polygons = _clean_polygons(obstacles)
+    # Keep the drawn canopy outline. Simplifying it pulls the boundary inward, and the
+    # walk would still cross the foliage the map shows.
+    canopy_polygons = _clean_polygons(canopies, simplify_m=0)
     blocked = _obstacle_union(polygons)
-    if blocked is not None and blocked.contains(ShapelyPoint(*origin)):
+    canopy_blocked = _obstacle_union(canopy_polygons)
+    if (blocked is not None and blocked.contains(ShapelyPoint(*origin))) or (
+        canopy_blocked is not None and canopy_blocked.contains(ShapelyPoint(*origin))
+    ):
         raise StartInsideObstacle()
     if not targets:
         return _degenerate(origin, ())
@@ -128,6 +140,7 @@ def _plan_local(
         return _degenerate(origin, unreachable)
 
     line = _straighten(_closed_walk(origin_point, reachable, graph, blocked), corridors, blocked)
+    line = _avoid_canopies(line, canopy_polygons, blocked, [candidate.original for candidate in reachable])
     return RoutePlan(route=line, length_m=float(line.length), unreachable=unreachable)
 
 
@@ -139,7 +152,7 @@ def _degenerate(origin: Coordinate, unreachable: tuple[Coordinate, ...]) -> Rout
     return RoutePlan(route=LineString([origin, origin]), length_m=0.0, unreachable=unreachable)
 
 
-def _clean_polygons(obstacles: Sequence[Sequence[Sequence[float]]]) -> list[Polygon]:
+def _clean_polygons(obstacles: Sequence[Sequence[Sequence[float]]], simplify_m: float = SIMPLIFY_M) -> list[Polygon]:
     polygons: list[Polygon] = []
     for ring in obstacles:
         cleaned = _dedupe(ring)
@@ -150,7 +163,7 @@ def _clean_polygons(obstacles: Sequence[Sequence[Sequence[float]]]) -> list[Poly
             continue
         if not polygon.is_valid:
             polygon = polygon.buffer(0)
-        simplified = polygon.simplify(SIMPLIFY_M, preserve_topology=True)
+        simplified = polygon if simplify_m <= 0 else polygon.simplify(simplify_m, preserve_topology=True)
         for piece in _polygon_parts(simplified):
             exterior = _open_ring(piece)
             if len(exterior) >= 3:
@@ -677,6 +690,303 @@ def _enters_obstacle(coords: list[Coordinate], blocked: BaseGeometry | None) -> 
         return False
     interior = overlap.difference(blocked.boundary)
     return not interior.is_empty and interior.length > CROSSING_M
+
+
+def _avoid_canopies(
+    line: LineString,
+    canopies: Sequence[Polygon],
+    blocked: BaseGeometry | None,
+    targets: Sequence[Coordinate],
+) -> LineString:
+    """Bend a finished walk around canopy rings without giving up a stop it already reached."""
+    solids = [polygon for polygon in canopies if isinstance(polygon, Polygon) and not polygon.is_empty]
+    if not solids or line.length == 0:
+        return line
+    coords = _dedupe_coords([(float(x), float(y)) for x, y in line.coords])
+    if len(coords) < 2:
+        return line
+    tree = STRtree(solids)
+    coords = _snap_off_canopies(coords, solids, tree, blocked, targets, line)
+    # A long alley segment can cross many vines. Clear every one of them before
+    # judging the walk, including the return trip over the same ground.
+    updated = _skirt_walk(coords, solids, tree, blocked, targets, line)
+    if updated is not None:
+        coords = updated
+    result = LineString(coords)
+    if blocked is not None and _enters_obstacle(coords, blocked):
+        return line
+    if not _visits_kept(line, result, targets):
+        return line
+    return result
+
+
+def _snap_off_canopies(
+    coords: list[Coordinate],
+    canopies: Sequence[Polygon],
+    tree: STRtree,
+    blocked: BaseGeometry | None,
+    targets: Sequence[Coordinate],
+    before: LineString,
+) -> list[Coordinate]:
+    """Move a vertex that sits inside a canopy onto the nearest free edge."""
+    snapped = list(coords)
+    last = len(coords) - 1
+    for index, point in enumerate(coords):
+        if index == 0 or index == last:
+            continue
+        place = ShapelyPoint(*point)
+        polygon = _containing_canopy(place, canopies, tree)
+        if polygon is None:
+            continue
+        free: BaseGeometry = polygon.exterior
+        if blocked is not None:
+            free = polygon.exterior.difference(blocked)
+        if free.is_empty:
+            continue
+        nearest = nearest_points(place, free)[1]
+        if place.distance(nearest) > VISIT_LIMIT_M:
+            continue
+        nudged = _nudge_outside(nearest, polygon, blocked)
+        trial = list(snapped)
+        trial[index] = (float(nudged.x), float(nudged.y))
+        trial_coords = _dedupe_coords(trial)
+        if len(trial_coords) < 2:
+            continue
+        if blocked is not None and _enters_obstacle(trial_coords, blocked):
+            continue
+        if not _visits_kept(before, LineString(trial_coords), targets):
+            continue
+        snapped = trial
+    return _dedupe_coords(snapped)
+
+
+def _containing_canopy(place: ShapelyPoint, canopies: Sequence[Polygon], tree: STRtree) -> Polygon | None:
+    for index in tree.query(place):
+        polygon = canopies[int(index)]
+        if polygon.contains(place):
+            return polygon
+    return None
+
+
+def _nudge_outside(point: ShapelyPoint, polygon: Polygon, blocked: BaseGeometry | None) -> ShapelyPoint:
+    dx = point.x - polygon.centroid.x
+    dy = point.y - polygon.centroid.y
+    norm = math.hypot(dx, dy) or 1.0
+    nudged = ShapelyPoint(point.x + dx / norm * OUTSIDE_GAP_M, point.y + dy / norm * OUTSIDE_GAP_M)
+    if polygon.contains(nudged):
+        return point
+    if blocked is not None and blocked.covers(nudged):
+        return point
+    return nudged
+
+
+def _skirt_walk(
+    coords: list[Coordinate],
+    canopies: Sequence[Polygon],
+    tree: STRtree,
+    blocked: BaseGeometry | None,
+    targets: Sequence[Coordinate],
+    before: LineString,
+) -> list[Coordinate]:
+    """Repeat until a pass no longer removes a canopy crossing.
+
+    An arc around one vine can cut the next one. The next pass bends around that too.
+    """
+    current = coords
+    crossings = _crossing_segments(current, canopies, tree)
+    for _ in range(8):
+        if crossings == 0:
+            break
+        walked: list[Coordinate] = []
+        for index in range(len(current) - 1):
+            cleared = _clear_segment(current[index], current[index + 1], canopies, tree, blocked)
+            walked.extend(cleared if not walked else cleared[1:])
+        walked = _dedupe_coords(walked)
+        if len(walked) < 2:
+            break
+        if blocked is not None and _enters_obstacle(walked, blocked):
+            break
+        if not _visits_kept(before, LineString(walked), targets):
+            break
+        updated = _crossing_segments(walked, canopies, tree)
+        if updated >= crossings:
+            break
+        current = walked
+        crossings = updated
+    return current
+
+
+def _crossing_segments(coords: list[Coordinate], canopies: Sequence[Polygon], tree: STRtree) -> int:
+    hits = 0
+    for index in range(len(coords) - 1):
+        segment = [coords[index], coords[index + 1]]
+        if math.hypot(segment[1][0] - segment[0][0], segment[1][1] - segment[0][1]) <= 1e-6:
+            continue
+        seg_line = LineString(segment)
+        for found in tree.query(seg_line, predicate="intersects"):
+            if _enters_obstacle(segment, canopies[int(found)]):
+                hits += 1
+                break
+    return hits
+
+
+def _clear_segment(
+    start: Coordinate,
+    end: Coordinate,
+    canopies: Sequence[Polygon],
+    tree: STRtree,
+    blocked: BaseGeometry | None,
+) -> list[Coordinate]:
+    """Walk from `start` to `end`, bending around each canopy the straight segment enters."""
+    points = [start]
+    cursor = start
+    for _ in range(len(canopies) + 1):
+        if math.hypot(end[0] - cursor[0], end[1] - cursor[1]) <= 1e-6:
+            break
+        segment = [cursor, end]
+        hit = _earliest_canopy(segment, canopies, tree)
+        if hit is None:
+            break
+        polygon, part = hit
+        arc = _free_arc(polygon, part, blocked)
+        if arc is None:
+            break
+        piece = _dedupe_coords([cursor, *arc])
+        if len(piece) < 2 or _enters_obstacle(piece, polygon):
+            break
+        if blocked is not None and _enters_obstacle(piece, blocked):
+            break
+        if math.hypot(piece[-1][0] - cursor[0], piece[-1][1] - cursor[1]) <= 1e-6:
+            break
+        points.extend(piece[1:])
+        cursor = points[-1]
+    if math.hypot(points[-1][0] - end[0], points[-1][1] - end[1]) > 1e-6:
+        points.append(end)
+    return points
+
+
+def _earliest_canopy(
+    segment: list[Coordinate], canopies: Sequence[Polygon], tree: STRtree
+) -> tuple[Polygon, LineString] | None:
+    seg_line = LineString(segment)
+    best: tuple[float, Polygon, LineString] | None = None
+    for index in tree.query(seg_line, predicate="intersects"):
+        polygon = canopies[int(index)]
+        if not _enters_obstacle(segment, polygon):
+            continue
+        parts = _line_parts(seg_line.intersection(polygon))
+        if not parts:
+            continue
+        part = min(parts, key=lambda item: float(seg_line.project(ShapelyPoint(item.coords[0]))))
+        if float(seg_line.project(ShapelyPoint(part.coords[-1]))) < float(seg_line.project(ShapelyPoint(part.coords[0]))):
+            part = LineString(list(reversed(part.coords)))
+        distance = float(seg_line.project(ShapelyPoint(part.coords[0])))
+        if best is None or distance < best[0] - 1e-9:
+            best = (distance, polygon, part)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def _line_parts(geometry: BaseGeometry) -> list[LineString]:
+    if geometry.is_empty:
+        return []
+    if isinstance(geometry, LineString):
+        return [geometry] if geometry.length > CROSSING_M else []
+    if not hasattr(geometry, "geoms"):
+        return []
+    parts: list[LineString] = []
+    for part in geometry.geoms:
+        parts.extend(_line_parts(part))
+    return parts
+
+
+def _free_arc(polygon: Polygon, part: LineString, blocked: BaseGeometry | None) -> list[Coordinate] | None:
+    ends = (
+        (float(part.coords[0][0]), float(part.coords[0][1])),
+        (float(part.coords[-1][0]), float(part.coords[-1][1])),
+    )
+    if any(_deep_inside(polygon, point) for point in ends):
+        return None
+    ring = LineString(polygon.exterior.coords)
+    if ring.length == 0:
+        return None
+    start = float(ring.project(ShapelyPoint(*ends[0])))
+    end = float(ring.project(ShapelyPoint(*ends[1])))
+    candidates = [_ring_arc(ring, start, end), list(reversed(_ring_arc(ring, end, start)))]
+    free: list[tuple[float, list[Coordinate]]] = []
+    for arc in candidates:
+        cleaned = _dedupe_coords(arc)
+        # A chord of the outline can sit just inside the foliage. Step out only then.
+        if len(cleaned) >= 2 and _enters_obstacle(cleaned, polygon):
+            cleaned = _step_outside(cleaned, polygon)
+        if len(cleaned) < 2 or _enters_obstacle(cleaned, polygon):
+            continue
+        if blocked is not None and _enters_obstacle(cleaned, blocked):
+            continue
+        free.append((float(LineString(cleaned).length), cleaned))
+    if not free:
+        return None
+    free.sort(key=lambda item: item[0])
+    return free[0][1]
+
+
+# Far enough to clear a boundary chord, and still short of the next vine.
+CANOPY_CLEARANCE_M = 0.03
+
+
+def _step_outside(arc: list[Coordinate], polygon: Polygon, gap: float = CANOPY_CLEARANCE_M) -> list[Coordinate]:
+    centre = polygon.centroid
+    stepped: list[Coordinate] = []
+    for x, y in arc:
+        dx, dy = x - centre.x, y - centre.y
+        norm = math.hypot(dx, dy) or 1.0
+        outward = (x + dx / norm * gap, y + dy / norm * gap)
+        if polygon.contains(ShapelyPoint(*outward)):
+            outward = (x - dx / norm * gap, y - dy / norm * gap)
+        stepped.append(outward)
+    return _dedupe_coords(stepped)
+
+
+def _deep_inside(polygon: Polygon, point: Coordinate) -> bool:
+    place = ShapelyPoint(*point)
+    return polygon.contains(place) and polygon.boundary.distance(place) > 1e-3
+
+
+def _ring_arc(ring: LineString, start: float, end: float) -> list[Coordinate]:
+    length = float(ring.length)
+    if length == 0:
+        return []
+    start %= length
+    end %= length
+    span = (end - start) % length
+    begin = ring.interpolate(start)
+    finish = ring.interpolate(end)
+    if span < 1e-9:
+        return [(float(begin.x), float(begin.y))]
+    coords = [(float(x), float(y)) for x, y in ring.coords]
+    if len(coords) > 1 and coords[0] == coords[-1]:
+        coords = coords[:-1]
+    travelled = 0.0
+    mids: list[tuple[float, Coordinate]] = []
+    previous: Coordinate | None = None
+    for point in coords:
+        if previous is not None:
+            travelled += math.hypot(point[0] - previous[0], point[1] - previous[1])
+        delta = (travelled - start) % length
+        if 1e-6 < delta < span - 1e-6:
+            mids.append((delta, point))
+        previous = point
+    mids.sort()
+    return [(float(begin.x), float(begin.y)), *[point for _, point in mids], (float(finish.x), float(finish.y))]
+
+
+def _visits_kept(before: LineString, after: LineString, targets: Sequence[Coordinate]) -> bool:
+    for target in targets:
+        place = ShapelyPoint(*target)
+        if before.distance(place) <= VISIT_LIMIT_M + 1e-6 and after.distance(place) > VISIT_LIMIT_M + 1e-3:
+            return False
+    return True
 
 
 def _closed_walk(

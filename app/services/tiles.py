@@ -103,13 +103,92 @@ def _source_window(ds: DatasetReader, bounds: Bounds) -> Window | None:
     return Window(col0, row0, col1 - col0, row1 - row0)
 
 
+def _adjacent(hit: np.ndarray) -> np.ndarray:
+    near = np.zeros(hit.shape, dtype=bool)
+    near[1:] |= hit[:-1]
+    near[:-1] |= hit[1:]
+    near[:, 1:] |= hit[:, :-1]
+    near[:, :-1] |= hit[:, 1:]
+    return near
+
+
+def _source_frame_mask(rgb: np.ndarray) -> np.ndarray:
+    """Magenta frames painted on the edge of each source tile, including averaged overviews."""
+    r = rgb[0].astype(np.int16)
+    g = rgb[1].astype(np.int16)
+    b = rgb[2].astype(np.int16)
+    line = (r >= 130) & (b >= 120) & ((r - g) >= 60) & ((b - g) >= 50) & (np.abs(r - b) <= 50)
+    line = line & _adjacent(line)
+    if not line.any():
+        return line
+    # Overview resampling bleeds the frame into the next pixel. That pixel is still magenta, not imagery.
+    bleed = (b > g + 8) & (r > g)
+    hole = line
+    for _ in range(2):
+        hole = hole | (bleed & _adjacent(hole))
+    return hole
+
+
+def _fill_along_width(
+    image: np.ndarray, hole: np.ndarray, source: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fill holes from the nearest imagery on the left or right."""
+    _, width, _ = image.shape
+    if width == 0 or not hole.any():
+        return image, hole, source
+    columns = np.arange(width, dtype=np.int32)
+    left = np.where(source, columns, np.int32(-1))
+    np.maximum.accumulate(left, axis=1, out=left)
+    right = np.where(source, columns, np.int32(width))
+    right = np.minimum.accumulate(right[:, ::-1], axis=1)[:, ::-1]
+
+    fill = hole & ((left >= 0) | (right < width))
+    if not fill.any():
+        return image, hole, source
+
+    rows, cols = np.nonzero(fill)
+    left_at = left[rows, cols]
+    right_at = right[rows, cols]
+    has_left = left_at >= 0
+    has_right = right_at < width
+    use_left = has_left & (~has_right | ((cols - left_at) <= (right_at - cols)))
+    taken = np.where(use_left, left_at, right_at)
+    image[rows, cols] = image[rows, taken]
+    hole[rows, cols] = False
+    source[rows, cols] = True
+    return image, hole, source
+
+
+def _erase_source_frames(rgb: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Replace baked-in magenta tile frames. Pixels with no imagery beside them become empty."""
+    hole = _source_frame_mask(rgb)
+    if not hole.any():
+        return rgb, mask
+    image = np.moveaxis(rgb, 0, -1).copy()
+    hole = hole.copy()
+    source = (~hole) & (mask > 0)
+    image, hole, source = _fill_along_width(image, hole, source)
+    swapped = (
+        np.swapaxes(image, 0, 1),
+        np.swapaxes(hole, 0, 1),
+        np.swapaxes(source, 0, 1),
+    )
+    _fill_along_width(*swapped)
+    if hole.any():
+        image[hole] = 0
+        mask = np.array(mask, copy=True)
+        mask[hole] = 0
+    return np.moveaxis(image, -1, 0), mask
+
+
 def _render(ds: DatasetReader, bounds: Bounds) -> bytes:
     window = _source_window(ds, bounds)
     if window is None:
         return empty_tile()
     indexes = [1, 2, 3] if ds.count >= 3 else [1, 1, 1]
     rgb = _to_uint8(ds.read(indexes, window=window))
-    source = np.concatenate([rgb, ds.dataset_mask(window=window)[np.newaxis]])
+    rgb, valid = _erase_source_frames(rgb, ds.dataset_mask(window=window))
+    source = np.concatenate([rgb, valid[np.newaxis]])
     tile = np.zeros((4, TILE_SIZE, TILE_SIZE), dtype=np.uint8)
     reproject(
         source,
