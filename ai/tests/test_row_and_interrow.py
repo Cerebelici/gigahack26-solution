@@ -398,7 +398,308 @@ class RowAndInterrowTestCase(unittest.TestCase):
         self.assertEqual(len(groups[0][0]), len(g1))
         self.assertEqual(len(groups[1][0]), len(g2))
 
+    def test_cross_tile_boundary_matching_with_angle_jitter_east_west(self):
+        """Test that collinear row segments crossing an East-West tile boundary receive identical row_ids despite angle jitter."""
+        from src.spatial.grid import pixel_to_map
+        stitcher = GlobalRowStitcher(offset_tolerance_m=0.40, boundary_tolerance_m=1.00)
+
+        # Tile A: siret3_r006_c002.tif (West), Tile B: siret3_r006_c003.tif (East)
+        # Tile A row ends near x=2048 at y=1000.
+        # Tile B row starts near x=0 at y=1010 (10px = 0.25m boundary offset, well within 1.0m).
+        # Introduce 2.0 degrees of angle jitter between tile A (angle ~25 deg) and tile B (angle ~23 deg).
+        pts_a_local = [(200.0, 140.0), (2048.0, 1000.0)]
+        pts_a_global = [pixel_to_map(6, 2, px, py) for px, py in pts_a_local]
+
+        pts_b_local = [(0.0, 1010.0), (1800.0, 1780.0)]
+        pts_b_global = [pixel_to_map(6, 3, px, py) for px, py in pts_b_local]
+
+        seg_a = LocalRowSegment(
+            tile_name="siret3_r006_c002.tif",
+            local_points=pts_a_local,
+            global_points=pts_a_global,
+            block_id="V01",
+            row_structure="regular",
+        )
+        seg_b = LocalRowSegment(
+            tile_name="siret3_r006_c003.tif",
+            local_points=pts_b_local,
+            global_points=pts_b_global,
+            block_id="V01",
+            row_structure="regular",
+        )
+
+        stitched = stitcher.stitch_block_rows("V01", [seg_a, seg_b])
+        self.assertEqual(len(stitched), 2)
+        # Both segments must receive identical row_id without off-by-1 mismatch
+        self.assertEqual(stitched[0].assigned_row_id, stitched[1].assigned_row_id)
+        self.assertEqual(stitched[0].assigned_row_id, "V01-R01")
+
+    def test_cross_tile_boundary_matching_with_angle_jitter_north_south(self):
+        """Test that collinear row segments crossing a North-South tile boundary receive identical row_ids (reproducing V02-R100/V02-R101 case)."""
+        from src.spatial.grid import pixel_to_map
+        stitcher = GlobalRowStitcher(offset_tolerance_m=0.40, boundary_tolerance_m=1.00)
+
+        # Tile A: siret3_r007_c003.tif (North), Tile B: siret3_r008_c003.tif (South)
+        # Actual coordinates reproducing V02-R100 and V02-R101 boundary crossing
+        # Angle ~113 deg. Tile A terminates near y=2048 (bottom). Tile B starts near y=0 (top).
+        pts_a_local = [(672.5, 0.0), (1532.3, 2025.5)]
+        pts_a_global = [pixel_to_map(7, 3, px, py) for px, py in pts_a_local]
+
+        pts_b_local = [(1517.5, 0.0), (2048.0, 1249.8)]
+        pts_b_global = [pixel_to_map(8, 3, px, py) for px, py in pts_b_local]
+
+        seg_a = LocalRowSegment(
+            tile_name="siret3_r007_c003.tif",
+            local_points=pts_a_local,
+            global_points=pts_a_global,
+            block_id="V02",
+            row_structure="regular",
+        )
+        seg_b = LocalRowSegment(
+            tile_name="siret3_r008_c003.tif",
+            local_points=pts_b_local,
+            global_points=pts_b_global,
+            block_id="V02",
+            row_structure="regular",
+        )
+
+        stitched = stitcher.stitch_block_rows("V02", [seg_a, seg_b])
+        self.assertEqual(len(stitched), 2)
+        # Segments must be unified into the same physical row with identical row_id!
+        self.assertEqual(stitched[0].assigned_row_id, stitched[1].assigned_row_id)
+        self.assertEqual(stitched[0].assigned_row_id, "V02-R01")
+
+    def test_cross_tile_chain_three_adjacent_tiles(self):
+        """Test continuous physical row running across 3 consecutive tiles (A -> B -> C)."""
+        from src.spatial.grid import pixel_to_map
+        stitcher = GlobalRowStitcher()
+
+        # Tiles along column: c001 -> c002 -> c003 at r009
+        pts_a = [(100.0, 500.0), (2048.0, 1000.0)]
+        pts_b = [(0.0, 1000.0), (2048.0, 1500.0)]
+        pts_c = [(0.0, 1505.0), (1500.0, 1850.0)]
+
+        seg_a = LocalRowSegment(
+            tile_name="siret3_r009_c001.tif",
+            local_points=pts_a,
+            global_points=[pixel_to_map(9, 1, px, py) for px, py in pts_a],
+            block_id="V03",
+        )
+        seg_b = LocalRowSegment(
+            tile_name="siret3_r009_c002.tif",
+            local_points=pts_b,
+            global_points=[pixel_to_map(9, 2, px, py) for px, py in pts_b],
+            block_id="V03",
+        )
+        seg_c = LocalRowSegment(
+            tile_name="siret3_r009_c003.tif",
+            local_points=pts_c,
+            global_points=[pixel_to_map(9, 3, px, py) for px, py in pts_c],
+            block_id="V03",
+        )
+
+        stitched = stitcher.stitch_block_rows("V03", [seg_a, seg_b, seg_c])
+        self.assertEqual(len(stitched), 3)
+        row_ids = [s.assigned_row_id for s in stitched]
+        self.assertEqual(row_ids[0], row_ids[1])
+        self.assertEqual(row_ids[1], row_ids[2])
+        self.assertEqual(row_ids[0], "V03-R01")
+
+    def test_multiple_parallel_rows_across_boundary_no_off_by_one(self):
+        """Test multiple parallel rows crossing adjacent tiles without index drift or off-by-1 errors."""
+        from src.spatial.grid import pixel_to_map
+        stitcher = GlobalRowStitcher()
+
+        # 3 parallel rows crossing from r006_c002 to r006_c003
+        segments = []
+        for i, y_cross in enumerate([400.0, 800.0, 1200.0], start=1):
+            pts_a = [(200.0, y_cross - 200.0), (2048.0, y_cross)]
+            pts_b = [(0.0, y_cross + 5.0), (1800.0, y_cross + 190.0)]
+            segments.append(
+                LocalRowSegment(
+                    tile_name="siret3_r006_c002.tif",
+                    local_points=pts_a,
+                    global_points=[pixel_to_map(6, 2, px, py) for px, py in pts_a],
+                    block_id="V01",
+                )
+            )
+            segments.append(
+                LocalRowSegment(
+                    tile_name="siret3_r006_c003.tif",
+                    local_points=pts_b,
+                    global_points=[pixel_to_map(6, 3, px, py) for px, py in pts_b],
+                    block_id="V01",
+                )
+            )
+
+        stitched = stitcher.stitch_block_rows("V01", segments)
+        self.assertEqual(len(stitched), 6)
+
+        # Group by tile
+        t2_segs = {s.local_points[1][1]: s.assigned_row_id for s in stitched if "c002" in s.tile_name}
+        t3_segs = {s.local_points[0][1]: s.assigned_row_id for s in stitched if "c003" in s.tile_name}
+
+        # Each pair crossing at the boundary must share the exact same row_id
+        self.assertEqual(t2_segs[400.0], t3_segs[405.0])
+        self.assertEqual(t2_segs[800.0], t3_segs[805.0])
+        self.assertEqual(t2_segs[1200.0], t3_segs[1205.0])
+
+        # Exactly 3 distinct row_ids must be assigned across the 6 segments
+        unique_ids = set(s.assigned_row_id for s in stitched)
+        self.assertEqual(len(unique_ids), 3)
+        self.assertEqual(sorted(unique_ids), ["V01-R01", "V01-R02", "V01-R03"])
+
+    def test_boundary_greedy_matching_does_not_merge_parallel_rows_on_same_tile(self):
+        """Test that greedy boundary matching does not collapse two parallel rows on tile A when both are within candidate range of a single row on tile B."""
+        from src.spatial.grid import pixel_to_map
+        stitcher = GlobalRowStitcher()
+
+        # seg1 on tile A: ends at x=2048, y=1000
+        # seg2 on tile B: starts at x=0, y=1000 (direct continuation of seg1)
+        # seg3 on tile A: ends at x=2048, y=1010 (parallel row on tile A, 0.25m away)
+        s1 = LocalRowSegment("siret3_r001_c001.tif", [(1000.0, 1000.0), (2048.0, 1000.0)], [pixel_to_map(1, 1, 1000.0, 1000.0), pixel_to_map(1, 1, 2048.0, 1000.0)], "V01")
+        s2 = LocalRowSegment("siret3_r001_c002.tif", [(0.0, 1000.0), (1000.0, 1000.0)], [pixel_to_map(1, 2, 0.0, 1000.0), pixel_to_map(1, 2, 1000.0, 1000.0)], "V01")
+        s3 = LocalRowSegment("siret3_r001_c001.tif", [(1000.0, 1010.0), (2048.0, 1010.0)], [pixel_to_map(1, 1, 1000.0, 1010.0), pixel_to_map(1, 1, 2048.0, 1010.0)], "V01")
+
+        # Provide in order [s1, s2, s3] where s2 appears between s1 and s3
+        res = stitcher.stitch_block_rows("V01", [s1, s2, s3])
+        # Two distinct rows on tile A must be preserved; s3 must NOT be merged into s1/s2!
+        t1_segs = [r for r in res if r.tile_name == "siret3_r001_c001.tif"]
+        self.assertEqual(len(t1_segs), 2)
+        # Distinct row IDs
+        self.assertNotEqual(t1_segs[0].assigned_row_id, t1_segs[1].assigned_row_id)
+        # s2 (y=1000 on tile B) must share row_id with s1 (y=1000 on tile A), not s3 (y=1010)
+        t1_by_y = {round(r.local_points[0][1]): r.assigned_row_id for r in t1_segs}
+        t2_segs = [r for r in res if r.tile_name == "siret3_r001_c002.tif"]
+        self.assertEqual(len(t2_segs), 1)
+        self.assertEqual(t2_segs[0].assigned_row_id, t1_by_y[1000])
+        self.assertNotEqual(t2_segs[0].assigned_row_id, t1_by_y[1010])
+
+    def test_collinear_clustering_with_gap_across_boundary_no_boundary_contact(self):
+        """Test that collinear row segments on adjacent tiles that do not reach the boundary (gap of 4m) still receive identical row_id."""
+        from src.spatial.grid import pixel_to_map
+        stitcher = GlobalRowStitcher()
+
+        # Tile A: siret3_r001_c001.tif ends 2.0m (80px) before boundary (at x=1968)
+        # Tile B: siret3_r001_c002.tif starts 2.0m (80px) after boundary (at x=80)
+        # Total gap across boundary = 4.0m
+        pts_a = [(100.0, 1000.0), (1968.0, 1000.0)]
+        pts_b = [(80.0, 1005.0), (1900.0, 1005.0)]  # 0.125m normal offset, well within 0.40m tolerance
+        s_a = LocalRowSegment("siret3_r001_c001.tif", pts_a, [pixel_to_map(1, 1, px, py) for px, py in pts_a], "V01")
+        s_b = LocalRowSegment("siret3_r001_c002.tif", pts_b, [pixel_to_map(1, 2, px, py) for px, py in pts_b], "V01")
+
+        res = stitcher.stitch_block_rows("V01", [s_a, s_b])
+        self.assertEqual(len(res), 2)
+        self.assertEqual(res[0].assigned_row_id, res[1].assigned_row_id)
+        self.assertEqual(res[0].assigned_row_id, "V01-R01")
+
+    def test_boundary_matching_rejects_incompatible_orientation(self):
+        """Test that segments meeting near a boundary but having orthogonal orientations are not merged."""
+        from src.spatial.grid import pixel_to_map
+        stitcher = GlobalRowStitcher()
+
+        # Segment A along row direction (~25 deg)
+        pts_a = [(1000.0, 600.0), (2048.0, 1000.0)]
+        # Segment B perpendicular (~115 deg)
+        pts_b = [(0.0, 1000.0), (500.0, 2048.0)]
+        s_a = LocalRowSegment("siret3_r006_c002.tif", pts_a, [pixel_to_map(6, 2, px, py) for px, py in pts_a], "V01")
+        s_b = LocalRowSegment("siret3_r006_c003.tif", pts_b, [pixel_to_map(6, 3, px, py) for px, py in pts_b], "V01")
+
+        res = stitcher.stitch_block_rows("V01", [s_a, s_b])
+        self.assertEqual(len(res), 2)
+        self.assertNotEqual(res[0].assigned_row_id, res[1].assigned_row_id)
+
+    def test_boundary_matching_with_normal_offset_merged_same_row_id(self):
+        """
+        Test that boundary crossings with normal offset 0.6m - 1.35m
+        (reproducing siret3_r008_c002 vs siret3_r008_c003 V02-R100/V02-R99 case with 1.04m normal offset)
+        successfully merge into the exact same row_id.
+        """
+        from src.spatial.grid import pixel_to_map
+        stitcher = GlobalRowStitcher()
+
+        # Real coordinates reproducing V02-R100 and V02-R99 across EW boundary:
+        # Tile A (c002): ends at (2048.0, 1869.1) on East boundary
+        # Tile B (c003): starts at (46.9, 1872.9) on West boundary
+        # Normal distance is 1.04m, along-boundary coordinate alignment is 0.095m
+        pts_a = [(1254.6, 0.0), (2048.0, 1869.1)]
+        pts_b = [(46.9, 1872.9), (121.2, 2048.0)]
+        seg_a = LocalRowSegment("siret3_r008_c002.tif", pts_a, [pixel_to_map(8, 2, px, py) for px, py in pts_a], "V02")
+        seg_b = LocalRowSegment("siret3_r008_c003.tif", pts_b, [pixel_to_map(8, 3, px, py) for px, py in pts_b], "V02")
+
+        res = stitcher.stitch_block_rows("V02", [seg_a, seg_b])
+        self.assertEqual(len(res), 2)
+        self.assertEqual(res[0].assigned_row_id, res[1].assigned_row_id)
+        self.assertEqual(res[0].assigned_row_id, "V02-R01")
+
+        # Also test boundary crossing with 1.30m normal offset (close to 1.40m limit)
+        # Shift seg_b by 1.25m normal offset (~50px)
+        pts_c = [(1000.0, 0.0), (2048.0, 1000.0)]
+        pts_d = [(0.0, 1050.0), (1000.0, 2048.0)]  # 50px = 1.25m offset along boundary
+        seg_c = LocalRowSegment("siret3_r001_c001.tif", pts_c, [pixel_to_map(1, 1, px, py) for px, py in pts_c], "V01")
+        seg_d = LocalRowSegment("siret3_r001_c002.tif", pts_d, [pixel_to_map(1, 2, px, py) for px, py in pts_d], "V01")
+
+        res_cd = stitcher.stitch_block_rows("V01", [seg_c, seg_d])
+        self.assertEqual(len(res_cd), 2)
+        self.assertEqual(res_cd[0].assigned_row_id, res_cd[1].assigned_row_id)
+        self.assertEqual(res_cd[0].assigned_row_id, "V01-R01")
+
+    def test_boundary_matching_with_slanted_endpoints_away_from_boundary_merged_same_id(self):
+        """
+        Test that slanted boundary crossings where endpoints terminate before/after the
+        shared tile seam (causing unprojected dy > 1.60m, e.g. 2.80m) successfully merge
+        into the exact same row_id because their normal offset is <= 1.40m and along-row gap <= 18m.
+        (Reproduces the real failure case in siret3_r007_c003 vs siret3_r007_c004 V02-R57/R58).
+        """
+        from src.spatial.grid import pixel_to_map
+        stitcher = GlobalRowStitcher()
+
+        # Real coordinates from siret3_r007_c003 vs siret3_r007_c004:
+        # Tile A (c003): ends at (2011.7, 1314.3), 36.3px (0.9m) from East boundary
+        # Tile B (c004): starts at (0.0, 1426.4) on West boundary
+        # Unprojected dy = 112.1px = 2.80m (> 1.60m!), but normal offset is only 0.26m!
+        pts_a = [(1455.0, 2.8), (2011.7, 1314.3)]
+        pts_b = [(0.0, 1426.4), (263.8, 2048.0)]
+        seg_a = LocalRowSegment("siret3_r007_c003.tif", pts_a, [pixel_to_map(7, 3, px, py) for px, py in pts_a], "V02")
+        seg_b = LocalRowSegment("siret3_r007_c004.tif", pts_b, [pixel_to_map(7, 4, px, py) for px, py in pts_b], "V02")
+
+        res = stitcher.stitch_block_rows("V02", [seg_a, seg_b])
+        self.assertEqual(len(res), 2)
+        self.assertEqual(res[0].assigned_row_id, res[1].assigned_row_id)
+        self.assertEqual(res[0].assigned_row_id, "V02-R01")
+
+    def test_boundary_matching_with_local_orientation_variation(self):
+        """
+        Test that row segments matching locally at an angle that deviates ~15 degrees
+        from the block modal angle still merge properly using local pair normal projection.
+        (Reproduces V27 case across siret3_r034_c025 and siret3_r034_c026).
+        """
+        from src.spatial.grid import pixel_to_map
+        stitcher = GlobalRowStitcher()
+
+        # Dominant block orientation is ~55 degrees (from segments 1-4)
+        # Segments 5 and 6 crossing the boundary between c025 and c026 run at ~40 degrees
+        segs = []
+        for i in range(4):
+            y_base = 500.0 + i * 200.0
+            p_1 = [(0.0, y_base), (2048.0, y_base + 1400.0)]  # ~55 deg
+            segs.append(LocalRowSegment(f"siret3_r036_c026.tif", p_1, [pixel_to_map(36, 26, px, py) for px, py in p_1], "V27"))
+
+        # Pair crossing at ~40 deg
+        pts_cross_a = [(1500.0, 100.0), (2048.0, 1500.0)]
+        pts_cross_b = [(50.0, 1530.0), (1000.0, 3000.0)]
+        segs.append(LocalRowSegment("siret3_r034_c025.tif", pts_cross_a, [pixel_to_map(34, 25, px, py) for px, py in pts_cross_a], "V27"))
+        segs.append(LocalRowSegment("siret3_r034_c026.tif", pts_cross_b, [pixel_to_map(34, 26, px, py) for px, py in pts_cross_b], "V27"))
+
+        res = stitcher.stitch_block_rows("V27", segs)
+        # Find segments on c025 and c026
+        seg_c25 = [s for s in res if s.tile_name == "siret3_r034_c025.tif"][0]
+        seg_c26 = [s for s in res if s.tile_name == "siret3_r034_c026.tif"][0]
+        self.assertEqual(seg_c25.assigned_row_id, seg_c26.assigned_row_id)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 

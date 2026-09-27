@@ -13,6 +13,7 @@ env/
 venv/
 .pytest_cache/
 .mypy_cache/
+.tools/
 
 # Training Dataset & Runs (Large Files - Do NOT commit)
 dataset/
@@ -23,6 +24,8 @@ runs/
 models/
 *.cache
 *.zip
+# Compressed joint canopy set. Each part is a normal zip under GitHub's 100 MB limit.
+!vine_joint_canopy_part*.zip
 
 # Ultralytics downloads and training output.
 waste/data/
@@ -39,14 +42,16 @@ assets/04_source/siret3_source_orthomosaic_EPSG4326.tif
 # Pretrained base weights (keep only the fine-tuned detectors)
 *.pt
 *.pth
-weights/
+weights/*
+!weights/block_unet.pt
 
 
 # Local temporary dumps
 output/
-exports/
 annotations*.xml
 coordinates*.json
+exports/_previous_1016/
+exports/cache/
 
 yolo26l-seg.pt
 yolo26n-seg.pt

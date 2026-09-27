@@ -1,14 +1,22 @@
 """
-Generate Marcaj CVAT 1.1 XML from file1.txt mapping.
+Generate Marcaj CVAT 1.1 XML and the whole-map deliverables from file1.txt.
 
-Reads vineyard_id/file_name pairings from file1.txt, runs YOLO26L inference
-on all unique vineyard tiles, assigns block IDs to canopies, extracts straight vine
-rows, stitches collinear rows across tile boundaries with sequential IDs (e.g. V01-R01),
-derives clean quadrilateral inter-row corridors, and outputs fully compliant CVAT 1.1 XML.
-Also supports exporting empty frames for non-vineyard challenge tiles and per-part XMLs for Marcaj.
+Reads vineyard_id/file_name pairings from file1.txt, runs YOLO26L inference on
+all unique vineyard tiles (cached), extracts per-tile row segments, then rebuilds
+the vineyard as a whole in EPSG:32635 (src/spatial/unify.py): segments are linked
+across tile edges into physical rows, refitted from all their vines, numbered per
+block, and inter-rows are derived between neighbouring rows. Rows and inter-rows
+are cut back to tiles so every piece of a row carries one row_id and the pieces
+meet at the tile edge.
+
+Outputs: master + per-part CVAT XML (+ Marcaj ZIPs), whole-map GeoJSON layers
+(blocks, rows, inter-rows, canopies, inspection targets), measurements.csv and
+route.geojson.
 """
 
 import argparse
+import csv
+import json
 import sys
 import time
 from collections import defaultdict, Counter
@@ -17,7 +25,8 @@ from typing import Dict, List, Tuple, Optional, Any, Set
 import cv2
 import numpy as np
 from PIL import Image
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon, mapping
+from shapely.ops import unary_union
 
 # Ensure repository root is on sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -33,14 +42,33 @@ from src.export.cvat_writer import (
     InterRowArea,
 )
 from src.spatial.grid import (
+    GSD,
     parse_tile_indices,
     pixel_to_map,
     tile_upper_left,
     TILE_SIZE_M,
 )
 from src.spatial.row_extractor import extract_rows_from_canopies, partition_canopies_by_orientation
-from src.spatial.row_stitcher import GlobalRowStitcher, LocalRowSegment
-from src.spatial.interrow import derive_interrow_quadrilaterals
+from src.spatial.interrow import classify_interrow_cover
+from src.spatial.block_cluster import load_passages_geometry
+from src.spatial.unify import (
+    TileSegment,
+    RowIndex,
+    block_polygons,
+    build_interrows,
+    build_physical_rows,
+    cut_polygons_to_tiles,
+    cut_rows_to_tiles,
+    drop_isolated_rows,
+    link_segments,
+    merge_collinear_rows,
+    reattach_canopies,
+    regroup_blocks,
+    split_at_clearings,
+    split_rows_at_passages,
+    suppress_parallel_duplicates,
+    number_rows,
+)
 from scripts.validate_annotations import validate_annotations
 
 
@@ -138,6 +166,28 @@ def parse_args():
         default=False,
         help="Package ready-to-upload Marcaj ZIP files in exports/zips/",
     )
+    parser.add_argument("--canopy-cache", type=str, default="exports/cache/canopies.json",
+                        help="JSON cache of per-tile canopy polygons ('' disables)")
+    parser.add_argument("--reuse-cache", action="store_true", default=False,
+                        help="Skip inference and read canopies from --canopy-cache")
+    parser.add_argument("--unified-dir", type=str, default="exports/unified",
+                        help="Directory for whole-map GeoJSON layers (EPSG:32635)")
+    parser.add_argument("--measurements", type=str, default="measurements.csv")
+    parser.add_argument("--route", type=str, default="route.geojson")
+    parser.add_argument("--skip-route", action="store_true", default=False)
+    parser.add_argument("--passages", type=str, default="assets/02_route/passages.geojson")
+    parser.add_argument("--forbidden", type=str, default="assets/02_route/forbidden.geojson")
+    parser.add_argument("--link-lateral-m", type=float, default=0.6,
+                        help="Max lateral offset when linking row segments across a tile edge (m)")
+    parser.add_argument("--link-gap-m", type=float, default=30.0,
+                        help="Max along-row gap bridged when linking row segments (m)")
+    parser.add_argument("--row-end-margin-m", type=float, default=0.5,
+                        help="Row axis runs this far past the first and last vine (m)")
+    parser.add_argument("--split-clearings", action="store_true", default=False,
+                        help="Also cut rows where a gap lines up with gaps in the neighbouring rows "
+                             "(tracks missing from passages.geojson). Over-splits sparse blocks.")
+    parser.add_argument("--min-row-m", type=float, default=1.5,
+                        help="Drop physical rows shorter than this (m)")
     return parser.parse_args()
 
 
@@ -276,87 +326,38 @@ def assign_canopy_block(
     return best_block
 
 
-def main():
-    args = parse_args()
 
-    # Resolve paths
-    file1_path = Path(args.file1)
-    tiles_dir = Path(args.tiles_dir)
-    out_xml_path = Path(args.output)
 
-    print("=" * 70)
-    print("Marcaj CVAT 1.1 XML Generator from file1.txt")
-    print(f"Mapping File:     {file1_path.resolve()}")
-    print(f"Tiles Directory:  {tiles_dir.resolve()}")
-    print(f"Model Weights:    {args.weights}")
-    print(f"Output XML:       {out_xml_path.resolve()}")
-    print(f"Confidence:       {args.conf} | ImgSz: {args.imgsz}")
-    print(f"Canopy Margin:    {args.margin_px} px ({args.margin_px * 0.025:.2f} m)")
-    print(f"Include Empty:    {not args.vineyard_only}")
-    print("=" * 70)
+# ---------------------------------------------------------------------------
+# Stage 1: canopy inference (cached)
+# ---------------------------------------------------------------------------
 
-    # 1. Load file1.txt mapping
-    tile_to_blocks, block_to_tiles = load_file1_mapping(str(file1_path))
-    unique_tiles = sorted(tile_to_blocks.keys())
-    print(f"Loaded {len(file1_path.read_text().splitlines())} lines from {file1_path.name}")
-    print(f"Identified {len(unique_tiles)} unique vineyard tiles across {len(block_to_tiles)} blocks.")
+def run_canopy_inference(args, tiles_to_process, all_disk_tiles) -> Dict[str, List[List[Tuple[float, float]]]]:
+    """YOLO canopy polygons per tile, deduplicated. Cached to JSON so the
+    whole-map post-processing can be re-run without the model."""
+    cache_path = Path(args.canopy_cache) if args.canopy_cache else None
+    if cache_path and args.reuse_cache and cache_path.exists():
+        cached = json.loads(cache_path.read_text())
+        if all(t in cached for t in tiles_to_process):
+            print(f"Loaded canopy cache: {cache_path} ({len(cached)} tiles)")
+            return {t: [[tuple(p) for p in poly] for poly in cached[t]] for t in tiles_to_process}
+        print("Canopy cache is missing tiles; running inference.")
 
-    # 2. Locate all tiles on disk
-    all_disk_tiles, tile_part_map = find_all_challenge_tiles(str(tiles_dir))
-    print(f"Found {len(all_disk_tiles)} total .tif tiles across challenge directories.")
-
-    # Verify that all 142 tiles in file1.txt exist on disk
-    missing = [t for t in unique_tiles if t not in all_disk_tiles]
-    if missing:
-        raise FileNotFoundError(
-            f"Error: {len(missing)} tiles from {file1_path.name} were not found on disk: {missing[:5]}"
-        )
-
-    # 3. Compute block reference geometry
-    block_centroids, shared_tile_directions = compute_block_reference_geometry(block_to_tiles)
-
-    # Determine subset of tiles to process if limit specified
-    tiles_to_process = unique_tiles[:args.limit] if args.limit is not None else unique_tiles
-    print(f"Processing {len(tiles_to_process)} vineyard tiles with YOLO26L...")
-
-    # 4. Initialize Pipeline and Load Model
     pipeline = VineyardPipeline(model_weights_path=args.weights)
     if args.device:
         pipeline.device = args.device
 
-    # Intermediate storage per tile:
-    # tile_canopies: tile_name -> List[VineyardCanopy]
-    # tile_rows: tile_name -> List[VineRow]
-    # tile_interrows: tile_name -> List[InterRowArea]
-    # block_row_segments: block_id -> List[LocalRowSegment]
-    tile_canopies_map: Dict[str, List[VineyardCanopy]] = defaultdict(list)
-    tile_block_row_data: Dict[str, Dict[str, Any]] = defaultdict(dict)
-    block_row_segments: Dict[str, List[LocalRowSegment]] = defaultdict(list)
-
-    total_canopies_detected = 0
+    tile_polys: Dict[str, List[List[Tuple[float, float]]]] = {}
     t_start = time.time()
-
-    # Process each vineyard tile
     for idx, tname in enumerate(tiles_to_process, start=1):
-        t_path = all_disk_tiles[tname]
-        r, c = parse_tile_indices(tname)
-        candidates = tile_to_blocks[tname]
-
-        # Model inference
         results = pipeline.model.predict(
-            str(t_path),
+            str(all_disk_tiles[tname]),
             conf=args.conf,
             imgsz=args.imgsz,
             max_det=1500,
             device=pipeline.device,
             verbose=False,
         )[0]
-
-        im_rgb = None
-        try:
-            im_rgb = np.array(Image.open(t_path).convert("RGB"))
-        except Exception:
-            im_rgb = None
 
         raw_candidates: List[Tuple[float, List[Tuple[float, float]]]] = []
         if results.masks is not None:
@@ -366,20 +367,16 @@ def main():
                 else [1.0] * len(results.masks.xy)
             )
             for mask, conf in zip(results.masks.xy, confs):
-                cleaned_polys = separate_canopy_polygon(
+                for poly_coords in separate_canopy_polygon(
                     mask,
                     min_dist_px=40.0,
                     min_area_px=args.min_area_px,
                     max_area_px=args.max_area_px,
                     simplify_tol=1.0,
-                )
-                for poly_coords in cleaned_polys:
+                ):
                     raw_candidates.append((float(conf), poly_coords))
 
-        canopy_polys: List[List[Tuple[float, float]]] = []
-        canopy_cents: List[Tuple[float, float]] = []
-
-        deduped_polys = nms_canopy_polygons(
+        tile_polys[tname] = nms_canopy_polygons(
             raw_candidates,
             iou_thresh=0.25,
             iomin_thresh=0.35,
@@ -387,318 +384,514 @@ def main():
             min_area_px=args.min_area_px,
             max_area_px=args.max_area_px,
         )
-        for poly_coords in deduped_polys:
-            canopy_polys.append(poly_coords)
-            c_poly = Polygon(poly_coords)
-            canopy_cents.append((float(c_poly.centroid.x), float(c_poly.centroid.y)))
-
-        # 1. Partition canopies if tile contains distinct plantings with different orientations
-        orientation_groups = partition_canopies_by_orientation(canopy_cents, min_angle_diff=25.0)
-        canopy_assigned_vid: Dict[int, str] = {}
-
-        for sub_cents, sub_indices, _ in orientation_groups:
-            if len(sub_cents) < 2:
-                continue
-
-            sub_v_rows, targets, sub_meta = extract_rows_from_canopies(
-                canopy_centroids=sub_cents,
-                vineyard_id=candidates[0],
-                tile_width=2048,
-                tile_height=2048,
-                min_vines_per_row=2,
-                return_metadata=True,
-                image_rgb=im_rgb,
-                headland_margin_px=60.0,
-            )
-
-            if not (sub_meta and sub_meta.get("rows_data")):
-                continue
-
-            # Group rows into connected plantings (spacing <= 160px / 4m)
-            rows_data = sorted(sub_meta["rows_data"], key=lambda r: r["c_val"])
-            plantings = []
-            curr_planting = [rows_data[0]]
-            for p_i in range(1, len(rows_data)):
-                spacing = rows_data[p_i]["c_val"] - rows_data[p_i - 1]["c_val"]
-                if spacing <= 160.0:  # <= 4m
-                    curr_planting.append(rows_data[p_i])
-                else:
-                    plantings.append(curr_planting)
-                    curr_planting = [rows_data[p_i]]
-            if curr_planting:
-                plantings.append(curr_planting)
-
-            for pl in plantings:
-                if len(candidates) == 1:
-                    assigned_pl_vid = candidates[0]
-                else:
-                    votes = []
-                    for rdata in pl:
-                        for px, py in rdata["cluster"]:
-                            votes.append(
-                                assign_canopy_block(
-                                    r=r,
-                                    c=c,
-                                    px=px,
-                                    py=py,
-                                    tile_name=tname,
-                                    candidate_blocks=candidates,
-                                    block_centroids=block_centroids,
-                                    shared_tile_directions=shared_tile_directions,
-                                )
-                            )
-                    assigned_pl_vid = Counter(votes).most_common(1)[0][0] if votes else candidates[0]
-
-                for rdata in pl:
-                    rdata["vineyard_id"] = assigned_pl_vid
-                    vr = rdata["vine_row"]
-                    vr.vineyard_id = assigned_pl_vid
-
-            # Organize rows and interrow metadata by block ID for this orientation group
-            rows_by_vid = defaultdict(list)
-            for rdata in sub_meta["rows_data"]:
-                vid = rdata.get("vineyard_id", candidates[0])
-                rows_by_vid[vid].append(rdata)
-
-            for vid, rdata_list in rows_by_vid.items():
-                v_rows = [rd["vine_row"] for rd in rdata_list]
-                for r_idx, (rd, vr) in enumerate(zip(rdata_list, v_rows), start=1):
-                    vr.row_id = f"{vid}-R{r_idx:02d}"
-                    rd["row_id"] = vr.row_id
-
-                tile_block_row_data[tname][vid] = {
-                    "v_rows": v_rows,
-                    "meta": {
-                        "rows_data": rdata_list,
-                        "normal_dir": sub_meta["normal_dir"],
-                        "primary_dir": sub_meta["primary_dir"],
-                        "azimuth_deg": sub_meta["azimuth_deg"],
-                    },
-                }
-
-                # Register segments for global cross-tile stitching
-                for vr in v_rows:
-                    g_pts = [pixel_to_map(r, c, px, py) for px, py in vr.points]
-                    block_row_segments[vid].append(
-                        LocalRowSegment(
-                            tile_name=tname,
-                            local_points=vr.points,
-                            global_points=g_pts,
-                            block_id=vid,
-                            row_structure=vr.row_structure,
-                        )
-                    )
-
-            # Assign block to each canopy in this group based on closest row
-            for orig_idx in sub_indices:
-                cx, cy = canopy_cents[orig_idx]
-                best_dist = 1e9
-                best_vid = None
-                for rdata in sub_meta["rows_data"]:
-                    c_val = rdata["c_val"]
-                    norm_dir = sub_meta["normal_dir"]
-                    prim_dir = sub_meta["primary_dir"]
-                    pt = np.array([cx, cy])
-                    dist_norm = abs(float(np.dot(pt, norm_dir)) - c_val)
-                    dist_along = float(np.dot(pt, prim_dir))
-                    if dist_norm < 35.0 and rdata["s_min"] - 70.0 <= dist_along <= rdata["s_max"] + 70.0:
-                        if dist_norm < best_dist:
-                            best_dist = dist_norm
-                            best_vid = rdata["vineyard_id"]
-                if best_vid is not None:
-                    canopy_assigned_vid[orig_idx] = best_vid
-
-        # Assign block to each canopy polygon
-        assigned_block_counts: Dict[str, int] = defaultdict(int)
-        for i, (poly_coords, (cx, cy)) in enumerate(zip(canopy_polys, canopy_cents)):
-            assigned_vid = canopy_assigned_vid.get(i)
-            if assigned_vid is None:
-                assigned_vid = assign_canopy_block(
-                    r=r,
-                    c=c,
-                    px=cx,
-                    py=cy,
-                    tile_name=tname,
-                    candidate_blocks=candidates,
-                    block_centroids=block_centroids,
-                    shared_tile_directions=shared_tile_directions,
-                )
-
-            tile_canopies_map[tname].append(
-                VineyardCanopy(points=poly_coords, vineyard_id=assigned_vid)
-            )
-            assigned_block_counts[assigned_vid] += 1
-            total_canopies_detected += 1
 
         if idx % 10 == 0 or idx == len(tiles_to_process):
             elapsed = time.time() - t_start
-            rate = idx / elapsed
-            remaining = (len(tiles_to_process) - idx) / (rate if rate > 0 else 1)
-            print(
-                f"[{idx:3d}/{len(tiles_to_process):3d}] {tname:22s} | "
-                f"Canopies: {len(canopy_polys):3d} | "
-                f"Blocks: {','.join(assigned_block_counts.keys()) or 'none':10s} | "
-                f"Elapsed: {elapsed:5.1f}s | ETA: {remaining:5.1f}s"
-            )
+            print(f"[{idx:3d}/{len(tiles_to_process):3d}] {tname:22s} | canopies {len(tile_polys[tname]):4d} | {elapsed:6.1f}s")
 
-    print("-" * 70)
-    print(f"Inference complete: {total_canopies_detected} total canopies in {time.time() - t_start:.1f}s.")
+    if cache_path:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps({t: [[list(p) for p in poly] for poly in polys] for t, polys in tile_polys.items()}))
+        print(f"Canopy cache saved: {cache_path}")
+    return tile_polys
 
-    # 5. Cross-Tile Global Row Stitching
-    print("Performing global collinear row stitching across tile boundaries...")
-    stitcher = GlobalRowStitcher(offset_tolerance_m=0.40)
-    tile_stitched_rows: Dict[str, Dict[str, List[VineRow]]] = defaultdict(lambda: defaultdict(list))
 
-    for b_id, segs in block_row_segments.items():
-        if segs:
-            updated_segs = stitcher.stitch_block_rows(b_id, segs)
-            for s in updated_segs:
-                vr = VineRow(
-                    points=s.local_points,
-                    vineyard_id=s.block_id,
-                    row_id=s.assigned_row_id,
-                    row_structure=s.row_structure,
-                )
-                tile_stitched_rows[s.tile_name][s.block_id].append(vr)
+def load_rgb(path: Path) -> Optional[np.ndarray]:
+    try:
+        return np.array(Image.open(path).convert("RGB"))
+    except Exception:
+        return None
 
-    # 6. Apply Stitched Rows and Derive Quadrilateral Interrows
-    print("Deriving straight quadrilateral inter-row corridors...")
-    tile_final_rows: Dict[str, List[VineRow]] = defaultdict(list)
-    tile_final_interrows: Dict[str, List[InterRowArea]] = defaultdict(list)
 
-    total_rows = 0
-    total_interrows = 0
+# ---------------------------------------------------------------------------
+# Stage 2: per-tile row segments
+# ---------------------------------------------------------------------------
 
+def extract_tile_segments(
+    tname: str,
+    canopy_polys: List[List[Tuple[float, float]]],
+    candidates: List[str],
+    im_rgb: Optional[np.ndarray],
+    block_centroids,
+    shared_tile_directions,
+) -> Tuple[List[TileSegment], List[str]]:
+    """
+    Row segments seen on one tile (map coordinates) and a first-guess block id
+    for every canopy. The block guess is refined later from the whole-map rows.
+    """
+    r, c = parse_tile_indices(tname)
+    canopy_cents = [
+        (float(Polygon(p).centroid.x), float(Polygon(p).centroid.y)) for p in canopy_polys
+    ]
+    segments: List[TileSegment] = []
+    canopy_vid: Dict[int, str] = {}
+
+    for sub_cents, sub_indices, _ in partition_canopies_by_orientation(canopy_cents, min_angle_diff=25.0):
+        if len(sub_cents) < 2:
+            continue
+        _, _, meta = extract_rows_from_canopies(
+            canopy_centroids=sub_cents,
+            vineyard_id=candidates[0],
+            tile_width=2048,
+            tile_height=2048,
+            min_vines_per_row=2,
+            return_metadata=True,
+            image_rgb=im_rgb,
+            headland_margin_px=60.0,
+        )
+        if not (meta and meta.get("rows_data")):
+            continue
+
+        # Group rows into connected plantings (spacing <= 160 px / 4 m), one block vote each
+        rows_data = sorted(meta["rows_data"], key=lambda rd: rd["c_val"])
+        plantings = [[rows_data[0]]]
+        for prev, cur in zip(rows_data[:-1], rows_data[1:]):
+            if cur["c_val"] - prev["c_val"] <= 160.0:
+                plantings[-1].append(cur)
+            else:
+                plantings.append([cur])
+
+        for pl in plantings:
+            if len(candidates) == 1:
+                vid = candidates[0]
+            else:
+                votes = [
+                    assign_canopy_block(r, c, px, py, tname, candidates, block_centroids, shared_tile_directions)
+                    for rd in pl for px, py in rd["cluster"]
+                ]
+                vid = Counter(votes).most_common(1)[0][0] if votes else candidates[0]
+            for rd in pl:
+                rd["vineyard_id"] = vid
+                p0, p1 = rd["points"][0], rd["points"][-1]
+                segments.append(TileSegment(
+                    tile_name=tname,
+                    block_id=vid,
+                    p0=pixel_to_map(r, c, *p0),
+                    p1=pixel_to_map(r, c, *p1),
+                    vines=np.array([pixel_to_map(r, c, px, py) for px, py in rd["cluster"]]),
+                ))
+
+        normal_dir, prim_dir = meta["normal_dir"], meta["primary_dir"]
+        for orig_idx in sub_indices:
+            pt = np.array(canopy_cents[orig_idx])
+            best = None
+            for rd in meta["rows_data"]:
+                dn = abs(float(np.dot(pt, normal_dir)) - rd["c_val"])
+                da = float(np.dot(pt, prim_dir))
+                if dn < 35.0 and rd["s_min"] - 70.0 <= da <= rd["s_max"] + 70.0 and (best is None or dn < best[0]):
+                    best = (dn, rd["vineyard_id"])
+            if best is not None:
+                canopy_vid[orig_idx] = best[1]
+
+    vids = [
+        canopy_vid.get(i) or assign_canopy_block(r, c, cx, cy, tname, candidates, block_centroids, shared_tile_directions)
+        for i, (cx, cy) in enumerate(canopy_cents)
+    ]
+    return segments, vids
+
+
+# ---------------------------------------------------------------------------
+# Outputs: GeoJSON layers, measurements, route
+# ---------------------------------------------------------------------------
+
+def _fc(name: str, features: List[dict]) -> dict:
+    return {
+        "type": "FeatureCollection",
+        "name": name,
+        "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::32635"}},
+        "features": features,
+    }
+
+
+def _geom(g) -> dict:
+    return mapping(g)
+
+
+def write_geojson(path: Path, name: str, features: List[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_fc(name, features)))
+    print(f"  Saved {path} ({len(features)} features)")
+
+
+def main():
+    args = parse_args()
+    file1_path = Path(args.file1)
+    tiles_dir = Path(args.tiles_dir)
+    out_xml_path = Path(args.output)
+    unified_dir = Path(args.unified_dir)
+
+    print("=" * 70)
+    print("Marcaj CVAT 1.1 XML Generator (whole-map unification)")
+    print(f"Mapping File:     {file1_path.resolve()}")
+    print(f"Tiles Directory:  {tiles_dir.resolve()}")
+    print(f"Model Weights:    {args.weights}")
+    print(f"Output XML:       {out_xml_path.resolve()}")
+    print(f"Unified layers:   {unified_dir.resolve()}")
+    print("=" * 70)
+    t_all = time.time()
+
+    tile_to_blocks, block_to_tiles = load_file1_mapping(str(file1_path))
+    unique_tiles = sorted(tile_to_blocks.keys())
+    print(f"Identified {len(unique_tiles)} unique vineyard tiles across {len(block_to_tiles)} blocks.")
+
+    all_disk_tiles, tile_part_map = find_all_challenge_tiles(str(tiles_dir))
+    print(f"Found {len(all_disk_tiles)} total .tif tiles across challenge directories.")
+    missing = [t for t in unique_tiles if t not in all_disk_tiles]
+    if missing:
+        raise FileNotFoundError(f"{len(missing)} tiles from {file1_path.name} were not found on disk: {missing[:5]}")
+
+    block_centroids, shared_tile_directions = compute_block_reference_geometry(block_to_tiles)
+    tiles_to_process = unique_tiles[:args.limit] if args.limit is not None else unique_tiles
+
+    # 1. Canopies per tile
+    t0 = time.time()
+    tile_polys = run_canopy_inference(args, tiles_to_process, all_disk_tiles)
+    t_infer = time.time() - t0
+
+    # 2. Per-tile row segments + first-guess canopy blocks
+    print("Extracting per-tile row segments...")
+    segments: List[TileSegment] = []
+    canopy_guess: Dict[str, List[str]] = {}
+    images: Dict[str, Optional[np.ndarray]] = {}
     for tname in tiles_to_process:
-        t_path = all_disk_tiles[tname]
-        im_rgb = None
-        try:
-            im_rgb = np.array(Image.open(t_path).convert("RGB"))
-        except Exception:
-            im_rgb = None
+        im = load_rgb(all_disk_tiles[tname])
+        images[tname] = im
+        segs, vids = extract_tile_segments(
+            tname, tile_polys[tname], tile_to_blocks[tname], im, block_centroids, shared_tile_directions
+        )
+        segments.extend(segs)
+        canopy_guess[tname] = vids
+    print(f"  {len(segments)} tile segments on {len(tiles_to_process)} tiles")
 
-        for vid, v_rows in tile_stitched_rows.get(tname, {}).items():
-            tile_final_rows[tname].extend(v_rows)
-            total_rows += len(v_rows)
+    # 3. Whole-map rows
+    print("Linking segments across tile edges into physical rows...")
+    passages = load_passages_geometry(args.passages)
+    chains = link_segments(segments, passages=passages, lateral_tol_m=args.link_lateral_m, max_gap_m=args.link_gap_m)
+    rows = build_physical_rows(segments, chains, end_margin_m=args.row_end_margin_m)
+    n_chained = len(rows)
+    rows = merge_collinear_rows(rows, passages=passages, end_margin_m=args.row_end_margin_m)
+    n_merged = len(rows)
+    rows = split_rows_at_passages(rows, passages, end_margin_m=args.row_end_margin_m)
+    rows = [r for r in rows if r.length_m >= args.min_row_m]
+    rows = suppress_parallel_duplicates(rows)
+    rows = drop_isolated_rows(rows)
+    all_cents = []
+    for tname in tiles_to_process:
+        r_, c_ = parse_tile_indices(tname)
+        for p in tile_polys[tname]:
+            cp = Polygon(p).centroid
+            all_cents.append(pixel_to_map(r_, c_, cp.x, cp.y))
+    rows = reattach_canopies(rows, np.array(all_cents), end_margin_m=args.row_end_margin_m)
+    n_clear = 0
+    if args.split_clearings:
+        rows, n_clear = split_at_clearings(rows, end_margin_m=args.row_end_margin_m)
+        rows = [r for r in rows if r.length_m >= args.min_row_m]
+    block_origin = regroup_blocks(rows, passages=passages)
+    n_noise = sum(1 for r in rows if not r.vineyard_id)
+    rows = [r for r in rows if r.vineyard_id]
+    renamed = {k: v for k, v in block_origin.items() if k != v}
+    print(f"  {n_clear} row cuts at clearings; {n_noise} isolated 1-2 row groups dropped; "
+          f"{len(block_origin)} blocks from connected rows"
+          + (f" (split from file1 blocks: {renamed})" if renamed else ""))
+    print(f"  rows: {n_chained} from chains -> {n_merged} after collinear merge -> {len(rows)} after road split and noise filter")
+    frames = number_rows(rows)
+    multi = sum(1 for ch in chains if len({segments[i].tile_name for i in ch}) > 1)
+    print(f"  {len(chains)} chains ({multi} cross a tile edge) -> {len(rows)} physical rows in {len(frames)} blocks")
 
-            orig_meta = tile_block_row_data.get(tname, {}).get(vid, {}).get("meta", {})
-            if orig_meta and len(v_rows) >= 2:
-                normal_dir = orig_meta["normal_dir"]
-                primary_dir = orig_meta["primary_dir"]
-                rows_metadata = []
-                for vr in v_rows:
-                    if len(vr.points) >= 2:
-                        c_val = float(np.mean([np.dot(np.array(pt), normal_dir) for pt in vr.points]))
-                        s_projs = [float(np.dot(np.array(pt), primary_dir)) for pt in vr.points]
-                        rows_metadata.append({
-                            "c_val": c_val,
-                            "s_min": min(s_projs),
-                            "s_max": max(s_projs),
-                            "points": vr.points,
-                            "row_id": vr.row_id,
-                            "row_structure": vr.row_structure,
-                            "vine_row": vr,
-                        })
+    # 4. Whole-map inter-rows
+    interrows = build_interrows(rows, frames, margin_m=args.margin_px * GSD)
+    print(f"  {len(interrows)} whole-map inter-row polygons")
 
-                if len(rows_metadata) >= 2:
-                    ir_quads = derive_interrow_quadrilaterals(
-                        rows_metadata=rows_metadata,
-                        normal_dir=normal_dir,
-                        primary_dir=primary_dir,
-                        vineyard_id=vid,
-                        image_rgb=im_rgb,
-                        margin_px=args.margin_px,
-                        tile_width=2048.0,
-                        tile_height=2048.0,
-                    )
-                    tile_final_interrows[tname].extend(ir_quads)
-                    total_interrows += len(ir_quads)
+    # 5. Canopies: block from the row they stand in
+    row_index = RowIndex(rows)
+    tile_canopies_map: Dict[str, List[VineyardCanopy]] = defaultdict(list)
+    canopy_records = []  # (tile, map polygon, vid, row index)
+    for tname in tiles_to_process:
+        r, c = parse_tile_indices(tname)
+        polys = tile_polys[tname]
+        if not polys:
+            continue
+        cents = []
+        for p in polys:
+            cp = Polygon(p).centroid
+            cents.append(pixel_to_map(r, c, cp.x, cp.y))
+        cents = np.array(cents)
+        in_row = row_index.nearest(cents, max_dist_m=1.0)
+        near = row_index.nearest(cents, max_dist_m=10.0)
+        for k, poly in enumerate(polys):
+            ridx = int(in_row[k])
+            if ridx >= 0:
+                vid = rows[ridx].vineyard_id
+            elif near[k] >= 0:
+                vid = rows[int(near[k])].vineyard_id
+            else:
+                vid = canopy_guess[tname][k]
+            tile_canopies_map[tname].append(VineyardCanopy(points=poly, vineyard_id=vid))
+            canopy_records.append((tname, Polygon([pixel_to_map(r, c, x, y) for x, y in poly]), vid, ridx))
 
-    # 7. Assemble CVAT 1.1 XML Writer
-    print(f"Assembling CVAT XML ({total_canopies_detected} canopies, {total_rows} rows, {total_interrows} interrows)...")
+    # 6. Cut back to tiles
+    valid_tiles = set(all_disk_tiles.keys())
+    row_pieces = cut_rows_to_tiles(rows, valid_tiles)
+    ir_pieces = cut_polygons_to_tiles([ir.polygon for ir in interrows], valid_tiles)
+
+    tile_final_rows: Dict[str, List[VineRow]] = defaultdict(list)
+    for tname, pieces in row_pieces.items():
+        for pc in pieces:
+            row = rows[pc.owner]
+            tile_final_rows[tname].append(VineRow(
+                points=pc.points, vineyard_id=row.vineyard_id, row_id=row.row_id, row_structure=pc.row_structure,
+            ))
+
+    tile_final_interrows: Dict[str, List[InterRowArea]] = defaultdict(list)
+    cover_votes: Dict[int, Counter] = defaultdict(Counter)
+    for tname, pieces in ir_pieces.items():
+        im = images.get(tname)
+        if im is None and tname in all_disk_tiles:
+            im = load_rgb(all_disk_tiles[tname])
+        for pc in pieces:
+            cover = classify_interrow_cover(pc.points, im)
+            ir = interrows[pc.owner]
+            cover_votes[pc.owner][cover] += Polygon(pc.points).area
+            tile_final_interrows[tname].append(InterRowArea(points=pc.points, vineyard_id=ir.vineyard_id, interrow_cover=cover))
+    for k, ir in enumerate(interrows):
+        if cover_votes[k]:
+            ir.interrow_cover = cover_votes[k].most_common(1)[0][0]
+
+    n_row_pieces = sum(len(v) for v in tile_final_rows.values())
+    n_ir_pieces = sum(len(v) for v in tile_final_interrows.values())
+    n_canopies = sum(len(v) for v in tile_canopies_map.values())
+
+    # 7. CVAT XML (master + per part + zips)
+    print(f"Assembling CVAT XML ({n_canopies} canopies, {n_row_pieces} row pieces, {n_ir_pieces} inter-row pieces)...")
     writer = CVATWriter(task_name="Vineyard AI Field Challenge", canopies_only=False)
-
-    # Determine complete set of tiles for XML output
     if args.vineyard_only:
-        output_tile_names = sorted(tiles_to_process)
+        output_tile_names = sorted(set(tiles_to_process) | set(tile_final_rows) | set(tile_final_interrows))
     else:
-        # Include all 311 challenge tiles in alphabetical order
-        output_tile_names = sorted(list(all_disk_tiles.keys()))
+        output_tile_names = sorted(all_disk_tiles.keys())
 
     per_part_writers: Dict[str, CVATWriter] = defaultdict(
         lambda: CVATWriter(task_name="Vineyard AI Field Challenge", canopies_only=False)
     )
-
     for tname in output_tile_names:
-        tile_ann = TileAnnotations(image_name=tname, width=2048, height=2048)
-        if tname in tile_canopies_map:
-            tile_ann.canopies = tile_canopies_map[tname]
-        if tname in tile_final_rows:
-            tile_ann.rows = tile_final_rows[tname]
-        if tname in tile_final_interrows:
-            tile_ann.interrows = tile_final_interrows[tname]
-
-        writer.add_tile(tile_ann)
-
-        # Add to per-part writer
-        part_name = tile_part_map.get(tname, "default")
-        per_part_writers[part_name].add_tile(
-            TileAnnotations(
-                image_name=tname,
-                width=2048,
-                height=2048,
-                canopies=list(tile_ann.canopies),
-                rows=list(tile_ann.rows),
-                interrows=list(tile_ann.interrows),
-            )
+        kwargs = dict(
+            canopies=list(tile_canopies_map.get(tname, [])),
+            rows=list(tile_final_rows.get(tname, [])),
+            interrows=list(tile_final_interrows.get(tname, [])),
+        )
+        writer.add_tile(TileAnnotations(image_name=tname, width=2048, height=2048, **kwargs))
+        per_part_writers[tile_part_map.get(tname, "default")].add_tile(
+            TileAnnotations(image_name=tname, width=2048, height=2048, **kwargs)
         )
 
-    # Write master XML
     out_xml_path.parent.mkdir(parents=True, exist_ok=True)
     writer.write(str(out_xml_path))
     print(f"Master XML saved to: {out_xml_path.resolve()} ({out_xml_path.stat().st_size / (1024*1024):.2f} MB)")
 
-    # Optionally write per-part XMLs
     if args.output_parts_dir:
         parts_dir = Path(args.output_parts_dir)
         parts_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Writing per-part XMLs into {parts_dir.resolve()}...")
         for part_name, p_writer in sorted(per_part_writers.items()):
             part_xml = parts_dir / f"annotations_{part_name}.xml"
             p_writer.write(str(part_xml))
             print(f"  Saved {part_xml.name} ({len(p_writer.tiles)} tiles)")
 
-    # Optionally package upload ZIPs for Marcaj
     if args.create_zips:
         import zipfile
-        zips_dir = Path(args.output_parts_dir or "exports") / "zips"
+        zips_dir = Path(args.output_parts_dir).parent / "zips" if args.output_parts_dir else Path("exports/zips")
         zips_dir.mkdir(parents=True, exist_ok=True)
         print(f"\nPackaging upload ZIPs for Marcaj in {zips_dir.resolve()}...")
         for part_name, p_writer in sorted(per_part_writers.items()):
             zip_path = zips_dir / f"{part_name}.zip"
-            xml_content = p_writer.to_xml_string()
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                # 1. Add annotations.xml at archive root
-                zf.writestr("annotations.xml", xml_content)
-                # 2. Add image files under images/
+                zf.writestr("annotations.xml", p_writer.to_xml_string())
                 for t in p_writer.tiles:
                     src_img = all_disk_tiles[t.image_name]
                     zf.write(src_img, arcname=f"images/{src_img.name}")
-            zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
-            print(f"  Created {zip_path.name} ({zip_size_mb:.1f} MB, {len(p_writer.tiles)} tiles)")
+            print(f"  Created {zip_path.name} ({zip_path.stat().st_size / (1024 * 1024):.1f} MB, {len(p_writer.tiles)} tiles)")
 
-    # 8. Validate Generated XML
-    print("\nRunning comprehensive validation on generated annotations...")
+    # 8. Whole-map layers for the web app and the route
+    print(f"\nWriting whole-map layers to {unified_dir}...")
+    tiles_of_row: Dict[int, List[str]] = defaultdict(list)
+    for tname, pieces in row_pieces.items():
+        for pc in pieces:
+            tiles_of_row[pc.owner].append(tname)
+
+    row_canopy_n: Dict[int, int] = Counter()
+    row_canopy_a: Dict[int, float] = defaultdict(float)
+    for _, g, _, ridx in canopy_records:
+        if ridx >= 0:
+            row_canopy_n[ridx] += 1
+            row_canopy_a[ridx] += g.area
+    row_ir_area: Dict[str, float] = defaultdict(float)
+    for ir in interrows:
+        for rid in ir.row_ids:
+            row_ir_area[rid] += 0.5 * ir.polygon.area
+
+    targets = []
+    row_features = []
+    for k, row in enumerate(rows):
+        gaps = row.gaps()
+        line = row.line
+        for g0, g1 in gaps:
+            p = line.interpolate(0.5 * (g0 + g1))
+            targets.append({
+                "target_id": f"T{len(targets) + 1:04d}",
+                "type": "row_gap",
+                "vineyard_id": row.vineyard_id,
+                "row_id": row.row_id,
+                "gap_m": round(g1 - g0, 2),
+                "x": round(p.x, 2),
+                "y": round(p.y, 2),
+            })
+        all_gaps = np.diff(row.vine_s) if len(row.vine_s) > 1 else np.array([0.0])
+        row_features.append({
+            "type": "Feature",
+            "properties": {
+                "row_id": row.row_id,
+                "vineyard_id": row.vineyard_id,
+                "length_m": round(row.length_m, 2),
+                "row_structure": "disrupted" if gaps else "regular",
+                "gap_count": len(gaps),
+                "max_gap_m": round(float(all_gaps.max()), 2),
+                "vine_count": len(row.vines),
+                "canopy_count": row_canopy_n.get(k, 0),
+                "canopy_area_m2": round(row_canopy_a.get(k, 0.0), 2),
+                "tile_count": len(set(tiles_of_row.get(k, []))),
+                "tiles": sorted(set(tiles_of_row.get(k, []))),
+            },
+            "geometry": _geom(LineString([(round(x, 3), round(y, 3)) for x, y in row.coords])),
+        })
+    write_geojson(unified_dir / "rows.geojson", "siret3_rows", row_features)
+
+    write_geojson(unified_dir / "interrows.geojson", "siret3_interrows", [
+        {
+            "type": "Feature",
+            "properties": {
+                "interrow_id": ir.interrow_id,
+                "vineyard_id": ir.vineyard_id,
+                "between_rows": list(ir.row_ids),
+                "interrow_cover": ir.interrow_cover,
+                "area_m2": round(ir.polygon.area, 2),
+            },
+            "geometry": _geom(ir.polygon.simplify(0.005)),
+        }
+        for ir in interrows
+    ])
+
+    canopy_by_block = defaultdict(list)
+    for tname, g, vid, _ in canopy_records:
+        canopy_by_block[vid].append(g)
+    write_geojson(unified_dir / "canopies.geojson", "siret3_canopies", [
+        {
+            "type": "Feature",
+            "properties": {"vineyard_id": vid, "tile": tname, "area_m2": round(g.area, 3)},
+            "geometry": _geom(g),
+        }
+        for tname, g, vid, _ in canopy_records
+    ])
+
+    block_outline = block_polygons(rows, interrows)
+    rows_by_block = defaultdict(list)
+    for row in rows:
+        rows_by_block[row.vineyard_id].append(row)
+    ir_by_block = defaultdict(list)
+    for ir in interrows:
+        ir_by_block[ir.vineyard_id].append(ir)
+
+    block_stats = {}
+    for vid in sorted(set(rows_by_block) | set(canopy_by_block)):
+        b_rows = rows_by_block.get(vid, [])
+        canopy_union = unary_union(canopy_by_block.get(vid, [])) if canopy_by_block.get(vid) else None
+        block_stats[vid] = {
+            "vineyard_id": vid,
+            "row_count": len(b_rows),
+            "total_row_length_m": round(sum(r.length_m for r in b_rows), 2),
+            "disrupted_rows": sum(1 for r in b_rows if r.gaps()),
+            "gap_count": sum(len(r.gaps()) for r in b_rows),
+            "canopy_count": len(canopy_by_block.get(vid, [])),
+            "canopy_area_m2": round(canopy_union.area, 2) if canopy_union is not None else 0.0,
+            "interrow_count": len(ir_by_block.get(vid, [])),
+            "interrow_area_m2": round(sum(ir.polygon.area for ir in ir_by_block.get(vid, [])), 2),
+            "block_area_m2": round(block_outline[vid].area, 2) if vid in block_outline else 0.0,
+        }
+    write_geojson(unified_dir / "blocks.geojson", "siret3_blocks", [
+        {"type": "Feature", "properties": block_stats[vid], "geometry": _geom(block_outline[vid])}
+        for vid in sorted(block_outline)
+    ])
+
+    write_geojson(unified_dir / "targets.geojson", "siret3_inspection_targets", [
+        {"type": "Feature", "properties": t, "geometry": {"type": "Point", "coordinates": [t["x"], t["y"]]}}
+        for t in targets
+    ])
+
+    # measurements.csv: one line per row, one per block, one total
+    csv_path = Path(args.measurements)
+    fields = [
+        "level", "vineyard_id", "row_id", "row_count", "row_length_m", "row_structure", "gap_count",
+        "canopy_count", "canopy_area_m2", "canopy_area_ha", "interrow_area_m2", "interrow_area_ha",
+        "block_area_m2", "block_area_ha", "tile_count",
+    ]
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for feat in sorted(row_features, key=lambda x: x["properties"]["row_id"]):
+            p = feat["properties"]
+            ira = row_ir_area.get(p["row_id"], 0.0)
+            w.writerow({
+                "level": "row", "vineyard_id": p["vineyard_id"], "row_id": p["row_id"], "row_count": 1,
+                "row_length_m": p["length_m"], "row_structure": p["row_structure"], "gap_count": p["gap_count"],
+                "canopy_count": p["canopy_count"], "canopy_area_m2": p["canopy_area_m2"],
+                "canopy_area_ha": round(p["canopy_area_m2"] / 1e4, 4),
+                "interrow_area_m2": round(ira, 2), "interrow_area_ha": round(ira / 1e4, 4),
+                "tile_count": p["tile_count"],
+            })
+        for vid, b in sorted(block_stats.items()):
+            w.writerow({
+                "level": "block", "vineyard_id": vid, "row_id": "", "row_count": b["row_count"],
+                "row_length_m": b["total_row_length_m"], "row_structure": "", "gap_count": b["gap_count"],
+                "canopy_count": b["canopy_count"], "canopy_area_m2": b["canopy_area_m2"],
+                "canopy_area_ha": round(b["canopy_area_m2"] / 1e4, 4),
+                "interrow_area_m2": b["interrow_area_m2"], "interrow_area_ha": round(b["interrow_area_m2"] / 1e4, 4),
+                "block_area_m2": b["block_area_m2"], "block_area_ha": round(b["block_area_m2"] / 1e4, 4),
+            })
+        tot = {k: sum(b[k] for b in block_stats.values()) for k in
+               ("row_count", "total_row_length_m", "gap_count", "canopy_count", "canopy_area_m2", "interrow_area_m2", "block_area_m2")}
+        w.writerow({
+            "level": "total", "vineyard_id": f"{len(block_stats)} blocks", "row_id": "", "row_count": tot["row_count"],
+            "row_length_m": round(tot["total_row_length_m"], 2), "row_structure": "", "gap_count": tot["gap_count"],
+            "canopy_count": tot["canopy_count"], "canopy_area_m2": round(tot["canopy_area_m2"], 2),
+            "canopy_area_ha": round(tot["canopy_area_m2"] / 1e4, 4),
+            "interrow_area_m2": round(tot["interrow_area_m2"], 2), "interrow_area_ha": round(tot["interrow_area_m2"] / 1e4, 4),
+            "block_area_m2": round(tot["block_area_m2"], 2), "block_area_ha": round(tot["block_area_m2"] / 1e4, 4),
+        })
+    print(f"  Saved {csv_path}")
+
+    # 9. Walking route over passages + whole-map inter-rows
+    if not args.skip_route:
+        from src.routing.solver import RouteSolver
+        print(f"\nSolving walking route over {len(targets)} inspection targets...")
+        t_r = time.time()
+        solver = RouteSolver(passages_geojson=args.passages, forbidden_geojson=args.forbidden)
+        solver.add_interrow_corridors([ir.polygon for ir in interrows])
+        route_coords, length_m, visited = solver.solve_route([(t["x"], t["y"]) for t in targets])
+        solver.export_geojson(route_coords, length_m, visited, len(targets), output_path=args.route)
+        print(f"  Saved {args.route}: {length_m} m, {visited}/{len(targets)} targets within 2 m ({time.time() - t_r:.1f}s)")
+
+    print("\nRunning validation on generated annotations...")
     validation_passed = validate_annotations(str(out_xml_path))
 
     print("\n" + "=" * 70)
     print("Execution Summary:")
-    print(f"Unique Vineyard Tiles:   {len(unique_tiles)}")
-    print(f"Total Tiles in XML:      {len(writer.tiles)}")
-    print(f"Total Canopies:          {total_canopies_detected}")
-    print(f"Total Row Centerlines:   {total_rows}")
-    print(f"Total Interrow Polygons: {total_interrows}")
-    print(f"Validation Status:       {'SUCCESS (100% compliant)' if validation_passed else 'WARNING: check logs'}")
+    print(f"Vineyard tiles processed: {len(tiles_to_process)} (inference {t_infer:.1f}s)")
+    print(f"Tiles in XML:             {len(writer.tiles)}")
+    print(f"Blocks:                   {len(block_stats)}")
+    print(f"Physical rows:            {len(rows)} ({n_row_pieces} per-tile pieces, {multi} chains cross tile edges)")
+    print(f"Total row length:         {sum(r.length_m for r in rows):.1f} m")
+    print(f"Inter-rows:               {len(interrows)} whole-map ({n_ir_pieces} per-tile pieces)")
+    print(f"Canopies:                 {n_canopies}")
+    print(f"Inspection targets:       {len(targets)}")
+    print(f"Total time:               {time.time() - t_all:.1f}s")
+    print(f"Validation Status:        {'PASSED' if validation_passed else 'WARNING: check logs'}")
     print("=" * 70)
 
 

@@ -26,6 +26,7 @@ class RouteSolver:
     """Solves optimal walking route visiting all inspection targets in EPSG:32635."""
 
     START_COORD = START_POINT  # (629504.70, 5220250.75)
+    CORRIDOR_ID_BASE = 1_000_000  # node ids >= this are inter-row corridor nodes
 
     def __init__(
         self,
@@ -97,13 +98,25 @@ class RouteSolver:
             self.G.add_node(i, pos=pos)
             self.node_positions[i] = pos
 
+        # The triangulation is not constrained to the polygon, so a centroid-to-
+        # centroid edge can cut a corner outside a curved road: charge the part
+        # outside, and never cross a forbidden zone.
+        inside_line = prep(poly.buffer(0.05))
         for i in inside_triangles:
             for neighbor in tri.neighbors[i]:
-                if neighbor in inside_triangles:
+                if neighbor > i and neighbor in inside_triangles:
                     p1 = inside_triangles[i]
                     p2 = inside_triangles[neighbor]
-                    d = np.hypot(p2[0] - p1[0], p2[1] - p1[1])
-                    self.G.add_edge(i, neighbor, weight=d)
+                    seg = LineString([p1, p2])
+                    if self.prep_forbidden and self.prep_forbidden.intersects(seg):
+                        continue
+                    w = seg.length
+                    if not inside_line.contains(seg):
+                        off = seg.difference(poly).length
+                        if off > 2.0:
+                            continue
+                        w += self.OFF_NETWORK_PENALTY * off
+                    self.G.add_edge(i, neighbor, weight=w)
 
         # Filter to largest connected component containing start
         comps = sorted(nx.connected_components(self.G), key=len, reverse=True)
@@ -131,7 +144,8 @@ class RouteSolver:
         if not interrow_polygons:
             return
 
-        next_node_id = max(self.G.nodes()) + 1 if self.G.number_of_nodes() > 0 else 1
+        next_node_id = max(max(self.G.nodes()) + 1, self.CORRIDOR_ID_BASE) if self.G.number_of_nodes() > 0 else self.CORRIDOR_ID_BASE
+        corridor_ends = []  # (node id, corridor index)
 
         for poly in interrow_polygons:
             if not poly.is_valid or poly.is_empty or poly.area < 2.0:
@@ -168,55 +182,122 @@ class RouteSolver:
                 continue
 
             steps = max(2, int(np.ceil(length / 5.0)))
-            corridor_nodes = []
+            # A forbidden zone inside the corridor cuts it into separate runs
+            runs: List[List[int]] = [[]]
             for s in range(steps + 1):
                 t = s / steps
                 cx = mid1[0] + t * (mid2[0] - mid1[0])
                 cy = mid1[1] + t * (mid2[1] - mid1[1])
-                c_pt = Point(cx, cy)
-
-                # Strictly check point is not forbidden
-                if self.prep_forbidden and self.prep_forbidden.contains(c_pt):
+                if self.prep_forbidden and self.prep_forbidden.contains(Point(cx, cy)):
+                    if runs[-1]:
+                        runs.append([])
                     continue
-
                 nid = next_node_id
                 next_node_id += 1
                 self.G.add_node(nid, pos=(cx, cy))
                 self.node_positions[nid] = (cx, cy)
-                corridor_nodes.append(nid)
+                runs[-1].append(nid)
 
-            # Connect consecutive points along corridor
-            for k in range(len(corridor_nodes) - 1):
-                n_a = corridor_nodes[k]
-                n_b = corridor_nodes[k + 1]
-                pa = self.node_positions[n_a]
-                pb = self.node_positions[n_b]
-                d = np.hypot(pb[0] - pa[0], pb[1] - pa[1])
-                self.G.add_edge(n_a, n_b, weight=d)
+            for corridor_nodes in runs:
+                if len(corridor_nodes) < 2:
+                    continue
+                for k in range(len(corridor_nodes) - 1):
+                    n_a, n_b = corridor_nodes[k], corridor_nodes[k + 1]
+                    seg = LineString([self.node_positions[n_a], self.node_positions[n_b]])
+                    if self.prep_forbidden and self.prep_forbidden.intersects(seg):
+                        continue
+                    self.G.add_edge(n_a, n_b, weight=seg.length)
+                self._finish_corridor(corridor_nodes, clean_poly, corridor_ends)
 
-            # Connect corridor endpoints to the nearest passages node
-            for end_nid in [corridor_nodes[0], corridor_nodes[-1]]:
-                end_pos = self.node_positions[end_nid]
-                # Find closest passage node
-                best_n = None
-                best_d = float("inf")
-                for n, pos in self.node_positions.items():
-                    if n < 50000:  # Passages node
-                        d = np.hypot(pos[0] - end_pos[0], pos[1] - end_pos[1])
-                        if d < best_d and d <= 15.0:
-                            best_d = d
-                            best_n = n
+        self._connect_corridor_ends(corridor_ends)
 
-                if best_n is not None:
-                    # Check connection does not cross forbidden
-                    line = LineString([Point(end_pos), Point(self.node_positions[best_n])])
-                    if not (self.prep_forbidden and self.prep_forbidden.intersects(line)):
-                        self.G.add_edge(end_nid, best_n, weight=best_d)
+    def _finish_corridor(self, corridor_nodes, clean_poly, corridor_ends):
+
+        corridor_ends.append((corridor_nodes[0], len(corridor_ends) // 2))
+        corridor_ends.append((corridor_nodes[-1], len(corridor_ends) // 2))
+        # Corridor edges that leave the polygon (bent strips) cost extra
+        for k in range(len(corridor_nodes) - 1):
+            n_a, n_b = corridor_nodes[k], corridor_nodes[k + 1]
+            if not self.G.has_edge(n_a, n_b):
+                continue
+            seg = LineString([self.node_positions[n_a], self.node_positions[n_b]])
+            off = seg.difference(clean_poly.buffer(0.05)).length
+            if off > 0.01:
+                self.G[n_a][n_b]["weight"] = seg.length + self.OFF_NETWORK_PENALTY * off
+
+    OFF_NETWORK_PENALTY = 9.0  # extra cost per metre walked outside passages / inter-rows
+
+    def _connect_corridor_ends(self, corridor_ends, max_hop_m: float = 3.5, max_cross_row_m: float = 3.0):
+        """
+        Join inter-row corridors to the passage network with the shortest hop
+        off the allowed surfaces: from the corridor end to the nearest point on
+        a passage, then inside the passage to its graph. Ends of neighbouring
+        corridors are also joined across the row end, at a high cost, so the
+        route only uses that where no passage is reachable.
+
+        The limits trade coverage for compliance: more than 2% of the route
+        off passages and inter-rows scores 0. Measured on the full site
+        (2026-09-27): 3.5 / 3.0 m -> 1.75% off, 38% of gap targets;
+        12 / 6 m -> 5.4% off, 74%.
+        """
+        from shapely.ops import nearest_points
+
+        if not corridor_ends or self.passages_geom is None:
+            return
+        passage_ids = [n for n in self.G.nodes() if n < self.CORRIDOR_ID_BASE]
+        passage_xy = np.array([self.node_positions[n] for n in passage_ids])
+        ptree = cKDTree(passage_xy)
+        inside = prep(self.passages_geom.buffer(0.1))
+        next_id = max(self.G.nodes()) + 1
+
+        for end_nid, _ in corridor_ends:
+            e = Point(self.node_positions[end_nid])
+            q = nearest_points(self.passages_geom, e)[0]
+            hop = e.distance(q)
+            if hop > max_hop_m:
+                continue
+            hop_line = LineString([e, q]) if hop > 1e-6 else None
+            if hop_line is not None and self.prep_forbidden and self.prep_forbidden.intersects(hop_line):
+                continue
+            q_id = next_id
+            next_id += 1
+            self.G.add_node(q_id, pos=(q.x, q.y))
+            self.node_positions[q_id] = (q.x, q.y)
+            self.G.add_edge(end_nid, q_id, weight=hop * (1.0 + self.OFF_NETWORK_PENALTY))
+            linked = False
+            _, idxs = ptree.query((q.x, q.y), k=min(8, len(passage_ids)))
+            for idx in np.atleast_1d(idxs):
+                n = passage_ids[int(idx)]
+                link = LineString([(q.x, q.y), self.node_positions[n]])
+                if inside.contains(link):
+                    self.G.add_edge(q_id, n, weight=link.length)
+                    linked = True
+            if not linked:
+                for idx in np.atleast_1d(idxs):
+                    n = passage_ids[int(idx)]
+                    link = LineString([(q.x, q.y), self.node_positions[n]])
+                    off = link.difference(self.passages_geom).length
+                    if off <= 1.0:
+                        self.G.add_edge(q_id, n, weight=link.length + self.OFF_NETWORK_PENALTY * off)
+                        break
+
+        # Neighbouring corridor ends, across the row end
+        end_xy = np.array([self.node_positions[n] for n, _ in corridor_ends])
+        etree = cKDTree(end_xy)
+        for a, b in etree.query_pairs(max_cross_row_m):
+            (na, ca), (nb, cb) = corridor_ends[a], corridor_ends[b]
+            if ca == cb:
+                continue
+            link = LineString([self.node_positions[na], self.node_positions[nb]])
+            if self.prep_forbidden and self.prep_forbidden.intersects(link):
+                continue
+            self.G.add_edge(na, nb, weight=link.length * (1.0 + self.OFF_NETWORK_PENALTY))
 
     def solve_route(
         self,
         targets: List[Tuple[float, float]],
         max_targets_sample: Optional[int] = None,
+        two_opt_seconds: float = 60.0,
     ) -> Tuple[List[Tuple[float, float]], float, int]:
         """
         Solves the TSP tour visiting all targets, starting and returning to START_COORD.
@@ -237,7 +318,9 @@ class RouteSolver:
 
         # 1. Connect each target to nearest node in G
         target_nodes = []
-        node_ids = list(self.node_positions.keys())
+        # Only nodes the start can reach: a target snapped elsewhere would need
+        # a straight jump off the network
+        node_ids = list(nx.node_connected_component(self.G, self.start_node_id))
         node_coords = np.array([self.node_positions[n] for n in node_ids])
         tree = cKDTree(node_coords)
 
@@ -287,29 +370,35 @@ class RouteSolver:
         # Return to start
         tour.append(0)
 
-        # 4. Optimize TSP Tour: 2-Opt Local Search
+        # 4. Optimize TSP Tour: 2-Opt Local Search (best move per i, full passes, time-capped)
+        import time as _time
+        t_end = _time.time() + two_opt_seconds
+        tour_arr = np.array(tour)
         improved = True
-        iterations = 0
-        while improved and iterations < 50:
+        while improved and _time.time() < t_end:
             improved = False
-            iterations += 1
-            for i in range(1, len(tour) - 2):
-                for j in range(i + 1, len(tour) - 1):
-                    d_current = dist_matrix[tour[i - 1], tour[i]] + dist_matrix[tour[j], tour[j + 1]]
-                    d_new = dist_matrix[tour[i - 1], tour[j]] + dist_matrix[tour[i], tour[j + 1]]
-                    if d_new < d_current - 0.1:
-                        tour[i : j + 1] = reversed(tour[i : j + 1])
-                        improved = True
-                        break
-                if improved:
+            for i in range(1, len(tour_arr) - 2):
+                a, b = tour_arr[i - 1], tour_arr[i]
+                c = tour_arr[i + 1 : len(tour_arr) - 1]
+                d = tour_arr[i + 2 :]
+                delta = dist_matrix[a, c] + dist_matrix[b, d] - dist_matrix[a, b] - dist_matrix[c, d]
+                k = int(np.argmin(delta))
+                if delta[k] < -0.1:
+                    j = i + 1 + k
+                    tour_arr[i : j + 1] = tour_arr[i : j + 1][::-1].copy()
+                    improved = True
+                if _time.time() >= t_end:
                     break
+        tour = [int(x) for x in tour_arr]
 
         # 5. Expand full coordinate path
         full_route: List[Tuple[float, float]] = []
         for k in range(len(tour) - 1):
             u = poi_nodes[tour[k]]
             v = poi_nodes[tour[k + 1]]
-            leg_path = paths_cache.get((u, v), [u, v])
+            leg_path = paths_cache.get((u, v))
+            if leg_path is None:
+                continue  # unreachable: never jump off the network
             leg_coords = [self.node_positions[nid] for nid in leg_path]
             if k == 0:
                 full_route.extend(leg_coords)

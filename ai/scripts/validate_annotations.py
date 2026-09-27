@@ -177,7 +177,7 @@ def validate_annotations(xml_path: str, min_canopy_area_px: float = 300.0, max_c
     if row_invalid_attrs > 0:
         print(f"Invalid Row Structure Attributes:{row_invalid_attrs}")
     if row_non_straight > 0:
-        print(f"Non-Straight Rows (!= 2 pts):   {row_non_straight}")
+        print(f"Bent Rows (> 2 pts, allowed):    {row_non_straight}")
 
     print("\n--- 3. Inter-Row Areas (`interrow_area`) ---")
     print(f"Total Interrow Corridors:        {interrow_count}")
@@ -185,7 +185,7 @@ def validate_annotations(xml_path: str, min_canopy_area_px: float = 300.0, max_c
     print(f"Self-Intersections:              {interrow_self_intersect}")
     print(f"Quadrilateral / Vertex Dist:     {dict(interrow_vertex_counts)}")
     if interrow_non_quad > 0:
-        print(f"Non-Quadrilateral Corridors:     {interrow_non_quad}")
+        print(f"Edge-cut / bent Corridors (!=4): {interrow_non_quad}")
     print(f"Ground Cover Distribution:       {dict(interrow_covers)}")
     if interrow_areas:
         print(f"Median Area:                     {np.median(interrow_areas):.1f} px² ({np.median(interrow_areas)*0.000625:.2f} m²)")
@@ -202,17 +202,15 @@ def validate_annotations(xml_path: str, min_canopy_area_px: float = 300.0, max_c
         and canopy_mergers == 0
         and interrow_invalid == 0
         and interrow_self_intersect == 0
-        and interrow_non_quad == 0
         and row_invalid_attrs == 0
-        and row_non_straight == 0
         and coords_out_of_bounds == 0
     )
 
     print("\n" + "=" * 70)
     if passed:
-        print("✓ VALIDATION PASSED: 100% valid simple closed polygons, 0 duplicates, 0 self-intersections, 100% 2-pt polylines, 100% 4-pt quadrilaterals.")
+        print("✓ VALIDATION PASSED: 100% valid simple closed polygons, 0 duplicates, 0 self-intersections, valid row and inter-row attributes.")
     else:
-        print("✗ VALIDATION FAILED: Found invalid geometries, duplicates, non-quadrilaterals, or out-of-spec attributes.")
+        print("✗ VALIDATION FAILED: Found invalid geometries, duplicates, or out-of-spec attributes.")
     print("=" * 70)
     return passed
 
