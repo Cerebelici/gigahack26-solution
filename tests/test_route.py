@@ -279,3 +279,27 @@ def test_targets_between_rows_are_reached_by_walking_around_them():
         assert plan.route.distance(Point(target)) <= 2.0
     assert list(plan.route.coords)[0] == pytest.approx(start)
     assert list(plan.route.coords)[-1] == pytest.approx(start)
+
+
+def test_route_bends_around_a_canopy_in_the_inter_row():
+    def strip(x):
+        return list(LineString([(x, 0), (x, 40)]).buffer(0.6, cap_style="flat").exterior.coords)
+
+    rows = [strip(0), strip(2.5)]
+    # Bulges past the alley centre (x = 1.25) without reaching the next row strip at x = 1.9.
+    canopy = list(Point(0.2, 20).buffer(1.2).exterior.coords)
+    start = (-3.0, -2.0)
+    target = (1.25, 35.0)
+
+    crossing = plan_route(rows, start, [target])
+    assert _enters_interior(crossing.route, canopy)
+
+    plan = plan_route(rows, start, [target], canopies=[canopy])
+
+    assert plan.unreachable == ()
+    assert not _enters_interior(plan.route, canopy)
+    walls = unary_union([Polygon(ring).buffer(-1e-3) for ring in rows])
+    assert not plan.route.intersects(walls)
+    assert plan.route.distance(Point(target)) <= 2
+    assert list(plan.route.coords)[0] == pytest.approx(start)
+    assert list(plan.route.coords)[-1] == pytest.approx(start)

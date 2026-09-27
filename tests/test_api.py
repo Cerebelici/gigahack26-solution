@@ -195,7 +195,7 @@ def test_raster_upload_is_stored_under_upload_dir_and_tiles(token, project, uplo
     assert res.status_code == 200, res.text
     raster = res.json()
     assert tif.RASTER_ID.fullmatch(raster["id"])
-    assert raster["tileUrl"] == f"http://testserver/tiles/{raster['id']}/{{z}}/{{x}}/{{y}}.png"
+    assert raster["tileUrl"] == f"http://testserver/tiles/{raster['id']}/{{z}}/{{x}}/{{y}}.png?v=2"
     assert raster["boundsEpsg32635"] == pytest.approx([UL_X, UL_Y - 300 * PIXEL_M, UL_X + 300 * PIXEL_M, UL_Y])
     assert raster["maxzoom"] == 22
     assert (upload_dir / raster["id"] / "raster.tif").is_file()

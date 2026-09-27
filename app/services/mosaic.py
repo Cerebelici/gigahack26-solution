@@ -400,24 +400,6 @@ def _paste_reprojected(src: DatasetReader, dst: DatasetWriter, dst_crs: CRS) -> 
         )
         dst.write(array, index, window=window)
     dst.write(np.full((int(window.height), int(window.width)), 255, dtype=np.uint8), 4, window=window)
-    _frame(dst, col0, row0, col1 - col0, row1 - row0)
-
-
-def _frame(dst: DatasetWriter, col: int, row: int, width: int, height: int) -> None:
-    """Paint the edge of one pasted source tile. The interior is left as copied."""
-    px = min(source_border_px(width, height), width, height)
-
-    def fill(left: int, top: int, box_width: int, box_height: int) -> None:
-        if box_width < 1 or box_height < 1:
-            return
-        patch = np.empty((3, box_height, box_width), dtype=np.uint8)
-        patch[0], patch[1], patch[2] = SOURCE_BORDER_COLOR
-        dst.write(patch, indexes=(1, 2, 3), window=Window(left, top, box_width, box_height))
-
-    fill(col, row, width, px)
-    fill(col, row + height - px, width, px)
-    fill(col, row, px, height)
-    fill(col + width - px, row, px, height)
 
 
 def _read_rgb(src: DatasetReader) -> np.ndarray:
