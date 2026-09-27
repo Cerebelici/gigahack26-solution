@@ -1,8 +1,9 @@
 .gbm-page {
   --nav-inset: 24px;
   --nav-slide: 0.46s cubic-bezier(0.22, 1, 0.36, 1);
-  /* Space kept free under the left column for the zoom chip (with replay) and the legend. */
-  --left-reserve: 246px;
+  /* Space kept free under the left column for the legend. The zoom chip sits beside the column. */
+  --left-reserve: 88px;
+  --left-width: 392px;
 
   position: relative;
   width: 100%;
@@ -148,11 +149,62 @@
 
 .gbm-left,
 .gbm-banner,
+.gbm-right,
 .gbm-detail-card {
   transition:
     top var(--nav-slide),
     height var(--nav-slide),
-    max-height var(--nav-slide);
+    max-height var(--nav-slide),
+    translate var(--nav-slide),
+    opacity var(--nav-slide);
+}
+
+/* Collapsed left column slides off to the left; its tab stays at the edge to bring it back. */
+
+.gbm-page.is-left-collapsed .gbm-left {
+  translate: calc(-1 * var(--left-width)) 0;
+  opacity: 0;
+}
+
+.gbm-left-toggle {
+  top: 112px;
+  left: calc(var(--left-width) - 22px);
+  width: 28px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 10px;
+  color: var(--green-deep);
+  cursor: pointer;
+  transition:
+    left var(--nav-slide),
+    top var(--nav-slide),
+    box-shadow 0.25s ease;
+}
+
+.gbm-left-toggle svg {
+  transition: rotate var(--nav-slide);
+}
+
+.gbm-page.is-nav-collapsed .gbm-left-toggle {
+  top: 100px;
+}
+
+.gbm-page.is-left-collapsed .gbm-left-toggle {
+  left: 12px;
+}
+
+.gbm-page.is-left-collapsed .gbm-left-toggle svg {
+  rotate: 180deg;
+}
+
+.gbm-zoom {
+  transition: left var(--nav-slide);
+}
+
+.gbm-page.is-left-collapsed .gbm-zoom {
+  left: 24px;
 }
 
 .gbm-page.is-nav-collapsed .gbm-banner {
@@ -165,7 +217,7 @@
   max-height: calc(100% - 76px - var(--left-reserve));
 }
 
-.gbm-page.is-nav-collapsed .gbm-detail-card {
+.gbm-page.is-nav-collapsed .gbm-right {
   top: 16px;
   max-height: calc(100% - 40px);
 }
@@ -195,14 +247,14 @@
   box-shadow: 0 0 10px var(--gold);
 }
 
-/* Left column: project card, route planner, then blocks. Height matches the slot above the legend so nested cards can shrink. */
+/* Left column: project card, route planner, then blocks. Stays above the legend. */
 
 .gbm-left {
   position: absolute;
   z-index: 3;
   top: 88px;
   left: 0;
-  width: 312px;
+  width: var(--left-width);
   height: calc(100% - 88px - var(--left-reserve));
   max-height: calc(100% - 88px - var(--left-reserve));
   overflow: hidden;
@@ -220,14 +272,24 @@
   min-height: 0;
 }
 
-/* Route card shrinks into the leftover column height and scrolls inside. Blocks keep their own height. */
+/* Annotations add the blocks list. The route card used to shrink until its scrollport was 0. */
 
 .gbm-left > [data-route-phase] {
-  flex: 0 1 auto;
-  min-height: 0;
+  flex: 2 1 200px;
+  min-height: 168px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+.gbm-left > .gbm-blocks {
+  flex: 1 1 140px;
+  min-height: 112px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
 }
 
 .gbm-route {
@@ -305,7 +367,6 @@ a.gbm-text-btn {
 
 .gbm-route-option.is-active {
   background: rgba(198, 233, 138, 0.12);
-  box-shadow: inset 3px 0 0 var(--lime), -4px 0 14px -6px var(--lime);
 }
 
 .gbm-route-radio {
@@ -351,9 +412,122 @@ a.gbm-text-btn {
   color: var(--muted);
 }
 
+.gbm-route-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  margin: 12px -2px 0;
+  padding: 10px 2px 2px;
+  background: linear-gradient(transparent, var(--card-solid) 14px);
+}
+
+.gbm-route-rules-box {
+  margin: 12px 4px 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.gbm-route-rules-box summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.gbm-route-rules-box .gbm-route-rules {
+  margin: 6px 0 0;
+}
+
+/* Placing the start point: a chip on the map says what the next click does. */
+
+.gbm-place-hint {
+  left: 50%;
+  bottom: 24px;
+  translate: -50% 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 8px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  animation: hud-in 0.3s var(--ease-out) both;
+}
+
+.gbm-place-hint-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--violet);
+  animation: beacon 1.4s ease-out infinite;
+}
+
+.gbm-place-hint kbd {
+  margin-left: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.gbm-route-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 4px 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.gbm-route-step > span {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-size: 10px;
+  color: var(--ink);
+}
+
+.gbm-route-step.is-done > span {
+  background: var(--lime);
+  box-shadow: 0 0 10px rgba(198, 233, 138, 0.5);
+  color: var(--on-accent);
+}
+
+.gbm-route-error {
+  margin-top: 10px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+}
+
 .gbm-route-result {
   margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(160, 140, 255, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(160, 140, 255, 0.35);
   font-size: 13px;
+}
+
+.gbm-route-result strong {
+  font-family: var(--font-mono);
+  color: #c9bfff;
+}
+
+.gbm-route-result .gbm-text-btn {
+  margin: 4px 0 0 -10px;
+}
+
+.gbm-route-warning {
+  margin-top: 4px !important;
+  font-size: 12px;
+  color: #ffd08a;
 }
 
 .gbm-route-result p {
@@ -372,7 +546,7 @@ a.gbm-text-btn {
 }
 
 .gbm-route-point {
-  margin: 0 4px 10px;
+  margin: 0 4px 8px;
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 700;
@@ -480,7 +654,6 @@ a.gbm-text-btn {
 
 .gbm-block.is-active {
   background: rgba(198, 233, 138, 0.12);
-  box-shadow: inset 3px 0 0 var(--lime), -4px 0 14px -6px var(--lime);
 }
 
 .gbm-block-name {
@@ -501,8 +674,8 @@ a.gbm-text-btn {
 /* Zoom chip */
 
 .gbm-zoom {
-  left: 24px;
-  bottom: 84px;
+  left: calc(var(--left-width) + 16px);
+  bottom: 72px;
   width: 46px;
   display: flex;
   flex-direction: column;
@@ -593,13 +766,38 @@ a.gbm-text-btn {
   border-radius: 3px;
 }
 
-/* Right detail card */
+/* Right column: cadastral parcel, then the annotation detail card. */
 
-.gbm-detail-card {
+.gbm-right {
+  position: absolute;
+  z-index: 3;
   top: 104px;
   right: 24px;
   width: 348px;
   max-height: calc(100% - 128px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  pointer-events: none;
+  min-height: 0;
+}
+
+.gbm-right > .gbm-float {
+  position: relative;
+  width: auto;
+  pointer-events: auto;
+  min-height: 0;
+}
+
+.gbm-parcel-card {
+  flex: 0 0 auto;
+  min-height: auto;
+  overflow: visible;
+  padding: 14px;
+}
+
+.gbm-detail-card {
+  flex: 1 1 auto;
   overflow-y: auto;
   padding: 14px;
   scrollbar-width: thin;
@@ -621,7 +819,6 @@ a.gbm-text-btn {
   margin-bottom: 12px;
   border-radius: 12px;
   background: linear-gradient(90deg, rgba(198, 233, 138, 0.12), rgba(198, 233, 138, 0.02));
-  box-shadow: inset 2px 0 0 var(--lime);
 }
 
 .gbm-section-head h4 {
@@ -1143,7 +1340,10 @@ a.gbm-text-btn {
   .gbm-page .topbar-user,
   .gbm-page .topbar-status,
   .gbm-left,
+  .gbm-left-toggle,
+  .gbm-zoom,
   .gbm-banner,
+  .gbm-right,
   .gbm-detail-card {
     transition: none;
   }
@@ -1158,6 +1358,7 @@ a.gbm-text-btn {
 @media (max-width: 860px) {
   .gbm-page {
     --nav-inset: 12px;
+    --left-width: min(300px, calc(100vw - 48px));
   }
 
   .gbm-topbar-wrap {
@@ -1198,7 +1399,7 @@ a.gbm-text-btn {
   .gbm-left {
     top: 108px;
     bottom: calc(42% + 20px);
-    width: 280px;
+    width: var(--left-width);
     height: auto;
     max-height: none;
     padding: 12px;
@@ -1209,6 +1410,14 @@ a.gbm-text-btn {
     min-height: 0;
   }
 
+  .gbm-route {
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+
   .gbm-left > .gbm-blocks {
     flex: 0 0 auto;
     max-height: 38%;
@@ -1217,17 +1426,18 @@ a.gbm-text-btn {
     scrollbar-color: var(--line) transparent;
   }
 
-  .gbm-page.is-nav-collapsed .gbm-detail-card {
+  .gbm-page.is-nav-collapsed .gbm-right {
     top: auto;
     max-height: 42%;
   }
 
-  .gbm-detail-card {
+  .gbm-right {
     top: auto;
     left: 12px;
     right: 12px;
     bottom: 12px;
     width: auto;
     max-height: 42%;
+    overflow-y: auto;
   }
 }

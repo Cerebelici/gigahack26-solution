@@ -14,4 +14,6 @@ export const MAP_COLORS = {
   routeFlow: "#ece8ff",
   halo: "#f4ffe6",
   scan: "#c6e98a",
+  parcel: "#7eb6ff",
+  parcelLine: "#d6e8ff",
 } as const;

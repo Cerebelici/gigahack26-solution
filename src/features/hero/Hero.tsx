@@ -5,7 +5,12 @@ import type { HeroSceneProps } from "./HeroScene";
 import "./hero.css";
 
 // three.js loads only with the hero. If the chunk fails, the CSS backdrop stays.
-const HeroScene = lazy<ComponentType<HeroSceneProps>>(() => import("./HeroScene").catch(() => ({ default: () => null })));
+const HeroScene = lazy<ComponentType<HeroSceneProps>>(() =>
+  import("./HeroScene").catch((error: unknown) => {
+    console.error("Hero scene failed to load", error);
+    return { default: () => null };
+  }),
+);
 
 function Backdrop() {
   return (

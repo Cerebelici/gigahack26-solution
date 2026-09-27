@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import type { Feature, FeatureCollection, MultiPolygon, Polygon } from "geojson";
 import {
   Map as MapLibreMap,
   Marker,
+  type GeoJSONSource,
   setWorkerUrl,
   type ExpressionSpecification,
   type FitBoundsOptions,
@@ -57,9 +59,66 @@ const BASE_STYLE: StyleSpecification = {
 
 const byLabel = (label: string): ExpressionSpecification => ["==", ["get", "label"], label];
 
+const EMPTY_COLLECTION: FeatureCollection = { type: "FeatureCollection", features: [] };
+
+/** A planned walk in lng/lat, with the targets it could not reach. */
+export type PlannedRoute = { line: LngLatPair[]; unreachable: LngLatPair[] };
+
+/** Cadastral parcel outline in WGS84 longitude, latitude. */
+export type CadastralFeature = Feature<Polygon | MultiPolygon>;
+
+function cadastralData(feature: CadastralFeature | null): FeatureCollection {
+  if (!feature) return EMPTY_COLLECTION;
+  return { type: "FeatureCollection", features: [feature] };
+}
+
+function showCadastral(map: MapLibreMap, feature: CadastralFeature | null) {
+  map.getSource<GeoJSONSource>("cadastral")?.setData(cadastralData(feature));
+}
+
+function geometryBounds(geometry: Polygon | MultiPolygon): [LngLatPair, LngLatPair] | null {
+  const box: [number, number, number, number] = [Infinity, Infinity, -Infinity, -Infinity];
+  const walk = (value: unknown) => {
+    if (!Array.isArray(value) || value.length === 0) return;
+    if (typeof value[0] === "number" && typeof value[1] === "number") {
+      box[0] = Math.min(box[0], value[0]);
+      box[1] = Math.min(box[1], value[1]);
+      box[2] = Math.max(box[2], value[0]);
+      box[3] = Math.max(box[3], value[1]);
+      return;
+    }
+    for (const child of value) walk(child);
+  };
+  walk(geometry.coordinates);
+  if (!Number.isFinite(box[0])) return null;
+  return [
+    [box[0], box[1]],
+    [box[2], box[3]],
+  ];
+}
+
+function plannedRouteData(plan: PlannedRoute | null): FeatureCollection {
+  if (!plan) return EMPTY_COLLECTION;
+  return {
+    type: "FeatureCollection",
+    features: [
+      { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: plan.line } },
+      ...plan.unreachable.map((point) => ({
+        type: "Feature" as const,
+        properties: {},
+        geometry: { type: "Point" as const, coordinates: point },
+      })),
+    ],
+  };
+}
+
+function showPlannedRoute(map: MapLibreMap, plan: PlannedRoute | null) {
+  map.getSource<GeoJSONSource>("planned-route")?.setData(plannedRouteData(plan));
+}
+
 function fitPadding(container: HTMLElement): FitBoundsOptions["padding"] {
   if (container.clientWidth < 860) return { top: 150, bottom: 40, left: 24, right: 24 };
-  return { top: 120, bottom: 80, left: 320, right: 400 };
+  return { top: 120, bottom: 80, left: 420, right: 400 };
 }
 
 function blockOpacity(base: number, block: string | null): number | ExpressionSpecification {
@@ -289,6 +348,59 @@ function addFieldLayers(map: MapLibreMap, data: FieldData) {
     },
   });
 
+  map.addSource("planned-route", { type: "geojson", data: EMPTY_COLLECTION });
+  const plannedLine: ExpressionSpecification = ["==", ["geometry-type"], "LineString"];
+  map.addLayer({
+    id: "planned-route-glow",
+    type: "line",
+    source: "planned-route",
+    filter: plannedLine,
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": MAP_COLORS.route, "line-width": 12, "line-blur": 8, "line-opacity": 0.55 },
+  });
+  map.addLayer({
+    id: "planned-route-line",
+    type: "line",
+    source: "planned-route",
+    filter: plannedLine,
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": MAP_COLORS.route, "line-width": 3.2 },
+  });
+  map.addLayer({
+    id: "planned-route-flow",
+    type: "line",
+    source: "planned-route",
+    filter: plannedLine,
+    layout: { "line-join": "round" },
+    paint: { "line-color": MAP_COLORS.routeFlow, "line-width": 1.6, "line-dasharray": FLOW_DASH },
+  });
+  map.addLayer({
+    id: "planned-route-miss",
+    type: "circle",
+    source: "planned-route",
+    filter: ["==", ["geometry-type"], "Point"],
+    paint: {
+      "circle-radius": 7,
+      "circle-color": "rgba(0, 0, 0, 0)",
+      "circle-stroke-color": MAP_COLORS.waste,
+      "circle-stroke-width": 2.5,
+    },
+  });
+
+  map.addSource("cadastral", { type: "geojson", data: EMPTY_COLLECTION });
+  map.addLayer({
+    id: "cadastral-fill",
+    type: "fill",
+    source: "cadastral",
+    paint: { "fill-color": MAP_COLORS.parcel, "fill-opacity": 0.18 },
+  });
+  map.addLayer({
+    id: "cadastral-line",
+    type: "line",
+    source: "cadastral",
+    paint: { "line-color": MAP_COLORS.parcelLine, "line-width": 2.5 },
+  });
+
   const noSelection: ExpressionSpecification = ["==", ["get", "fid"], -1];
   map.addLayer({
     id: "selected-halo",
@@ -342,6 +454,8 @@ interface MapViewProps {
   onMapClick: (click: MapClick) => void;
   /** Reveal progress for live counters; `null` once the reveal has finished or was skipped. */
   onRevealProgress?: (progress: RevealProgress | null) => void;
+  plannedRoute?: PlannedRoute | null;
+  cadastral?: CadastralFeature | null;
 }
 
 const HUD_LINGER_MS = 1400;
@@ -354,6 +468,8 @@ export function MapView({
   interaction,
   onMapClick,
   onRevealProgress,
+  plannedRoute = null,
+  cadastral = null,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -361,7 +477,7 @@ export function MapView({
   const onMapClickRef = useRef(onMapClick);
   const onRevealRef = useRef(onRevealProgress);
   const interactionRef = useRef(interaction);
-  const stateRef = useRef({ highlightedIds, activeBlock });
+  const stateRef = useRef({ highlightedIds, activeBlock, plannedRoute, cadastral });
   const lastBlockRef = useRef<string | null>(activeBlock);
   const revealRef = useRef<RevealHandle | null>(null);
   /** True while the real layers' opacity is multiplied by the reveal state. */
@@ -376,7 +492,7 @@ export function MapView({
     onMapClickRef.current = onMapClick;
     onRevealRef.current = onRevealProgress;
     interactionRef.current = interaction;
-    stateRef.current = { highlightedIds, activeBlock };
+    stateRef.current = { highlightedIds, activeBlock, plannedRoute, cadastral };
   });
 
   useEffect(() => {
@@ -456,7 +572,11 @@ export function MapView({
       lastBlockRef.current = stateRef.current.activeBlock;
       map.fitBounds(data.bounds, { padding: fitPadding(container), animate: false, maxZoom: 23 });
       setZoom(map.getZoom());
-      ambientRef.current = startAmbientMotion(map, { flow: hasRoutes(data) && !prefersReducedMotion() });
+      showPlannedRoute(map, stateRef.current.plannedRoute);
+      showCadastral(map, stateRef.current.cadastral);
+      ambientRef.current = startAmbientMotion(map, {
+        flow: (hasRoutes(data) || stateRef.current.plannedRoute !== null) && !prefersReducedMotion(),
+      });
       ambientRef.current.setHalo(stateRef.current.highlightedIds.length > 0 && !prefersReducedMotion());
       startReveal();
     });
@@ -484,7 +604,7 @@ export function MapView({
       const over = map.queryRenderedFeatures(event.point, { layers: INTERACTIVE_LAYERS }).length > 0;
       const canvas = map.getCanvas();
       if (place && !pick) canvas.style.cursor = "crosshair";
-      else if (over) canvas.style.cursor = "pointer";
+      else if (over || !pick) canvas.style.cursor = "pointer";
       else if (place) canvas.style.cursor = "crosshair";
       else canvas.style.cursor = "";
     });
@@ -514,19 +634,37 @@ export function MapView({
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || zoom === null || !anchorLngLat) return;
+    if (!map || !readyRef.current) return;
+    showPlannedRoute(map, plannedRoute);
+    ambientRef.current?.setFlow((hasRoutes(data) || plannedRoute !== null) && !reducedMotion);
+  }, [plannedRoute, data, reducedMotion]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const container = containerRef.current;
+    if (!map || !container || !readyRef.current) return;
+    showCadastral(map, cadastral);
+    if (!cadastral) return;
+    const bounds = geometryBounds(cadastral.geometry);
+    if (bounds) map.fitBounds(bounds, { padding: fitPadding(container), maxZoom: 17, duration: reducedMotion ? 0 : 600 });
+  }, [cadastral, reducedMotion]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !anchorLngLat) return;
+    // The pin sits in the canvas container. Only the pin ignores hits; the container must keep
+    // receiving pan and zoom.
+    map.getCanvasContainer().style.pointerEvents = "";
     const element = document.createElement("div");
     element.className = "gbm-route-pin";
     element.setAttribute("role", "img");
     element.setAttribute("aria-label", "Route start and end");
     const marker = new Marker({ element, anchor: "center" }).setLngLat(anchorLngLat).addTo(map);
-    const pin = marker.getElement();
-    pin.style.pointerEvents = "none";
-    if (pin.parentElement) pin.parentElement.style.pointerEvents = "none";
+    marker.getElement().style.pointerEvents = "none";
     return () => {
       marker.remove();
     };
-  }, [anchorLngLat, zoom]);
+  }, [anchorLngLat]);
 
   useEffect(() => {
     const map = mapRef.current;

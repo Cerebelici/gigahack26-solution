@@ -109,6 +109,21 @@
   text-decoration: none;
 }
 
+.btn-ghost.is-danger:hover:not(:disabled) {
+  background: rgba(255, 140, 120, 0.12);
+  color: #ffb4a8;
+}
+
+.btn-ghost:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.form-delete {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
 .btn-small {
   padding: 9px 18px;
   font-size: 14px;

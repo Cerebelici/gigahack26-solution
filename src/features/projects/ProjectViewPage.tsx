@@ -5,7 +5,6 @@ import { resolveApiUrl } from "../../api/client";
 import { describeError } from "../../api/errors";
 import { getProject } from "../../api/projects";
 import { TopBar } from "../../components/TopBar";
-import { annotationOverlay } from "../map/annotationOverlay";
 import { FieldMap } from "../map/FieldMap";
 import { buildFieldData, collectPositions } from "../map/project";
 import { MapBanner } from "../map/SidePanels";
@@ -30,13 +29,9 @@ function featureBounds(collection: FeatureCollection): ProcessResult["boundsEpsg
   return [Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad];
 }
 
-/** Imagery plus stored annotations. A `/process-tif` overlay is drawn on top when the latest upload had one. */
+/** Imagery plus the annotations stored for the project. */
 function projectResult(project: Project): ProcessResult | null {
-  const stored = storedFeatures(project);
-  const overlay = annotationOverlay(project.id);
-  const features: FeatureCollection = overlay
-    ? { type: "FeatureCollection", features: [...stored.features, ...overlay.features] }
-    : stored;
+  const features = storedFeatures(project);
   const { raster } = project;
   const bounds = raster?.boundsEpsg32635 ?? featureBounds(features);
   if (!bounds) return null;

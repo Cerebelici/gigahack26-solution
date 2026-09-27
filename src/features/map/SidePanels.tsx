@@ -1,4 +1,5 @@
 import { useMemo, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
+import type { ParcelLookup } from "../../api/geodata";
 import { CountUp } from "../../components/CountUp";
 import { MAP_COLORS } from "./palette";
 import { asNumber, formatArea, formatHectares, formatMetres } from "./project";
@@ -417,12 +418,64 @@ export function DetailCard({ items, selected, onSelect, rowShare = 1, polygonSha
   );
 }
 
+export type ParcelPhase = "loading" | "ready" | "error";
+
+export function ParcelCard({
+  phase,
+  lookup,
+  error,
+  onClear,
+}: {
+  phase: ParcelPhase;
+  lookup: ParcelLookup | null;
+  error: string | null;
+  onClear: () => void;
+}) {
+  const parcel = phase === "ready" ? (lookup?.parcel ?? null) : null;
+  const title =
+    parcel?.cadastralCode ??
+    (phase === "loading" ? "Looking up…" : phase === "error" ? "Lookup failed" : "No parcel");
+
+  return (
+    <aside className="gbm-card gbm-parcel-card gbm-float" aria-live="polite" aria-label="Cadastral parcel" {...cardEvents}>
+      <div className="gbm-detail-head">
+        <div>
+          <div className="gbm-eyebrow">
+            <span className="gbm-dot" style={{ background: MAP_COLORS.parcel }} />
+            Cadastral parcel
+          </div>
+          <h3>{title}</h3>
+        </div>
+        <button type="button" className="gbm-text-btn" onClick={onClear}>
+          Clear
+        </button>
+      </div>
+      {phase === "loading" && <p className="gbm-empty">Asking the cadastral service…</p>}
+      {phase === "error" && <p className="gbm-empty">{error}</p>}
+      {phase === "ready" && !parcel && <p className="gbm-empty">No cadastral parcel at this point.</p>}
+      {parcel && (
+        <KeyValues
+          rows={[
+            { term: "Parcel", value: parcel.parcelCode },
+            { term: "Area", value: parcel.area },
+            { term: "Land use", value: parcel.landUse },
+            { term: "Property", value: parcel.propertyType },
+            { term: "Locality", value: parcel.locality },
+            { term: "District", value: parcel.district },
+          ]}
+        />
+      )}
+    </aside>
+  );
+}
+
 const LEGEND = [
   { label: "Canopy", fill: MAP_COLORS.canopy, border: MAP_COLORS.canopyLine, kind: "area" },
   { label: "Inter-row", fill: MAP_COLORS.interrow, border: MAP_COLORS.interrowLine, kind: "area" },
   { label: "Row", fill: MAP_COLORS.row, border: MAP_COLORS.row, kind: "line" },
   { label: "Waste", fill: "transparent", border: MAP_COLORS.waste, kind: "box" },
   { label: "Route", fill: MAP_COLORS.route, border: MAP_COLORS.route, kind: "line" },
+  { label: "Parcel", fill: MAP_COLORS.parcel, border: MAP_COLORS.parcelLine, kind: "area" },
 ] as const;
 
 export function LegendChip() {

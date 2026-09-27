@@ -24,13 +24,17 @@ const FLOW_SEQUENCE = [
 const STEP_MS = 55;
 const HALO_PERIOD_MS = 1600;
 
+const FLOW_LAYERS = ["route-flow", "planned-route-flow"];
+
 export interface AmbientMotion {
   setHalo(active: boolean): void;
+  setFlow(active: boolean): void;
   stop(): void;
 }
 
 /** Continuous route flow and selection pulse. Runs only while one of them has something to animate. */
-export function startAmbientMotion(map: MapLibreMap, { flow }: { flow: boolean }): AmbientMotion {
+export function startAmbientMotion(map: MapLibreMap, options: { flow: boolean }): AmbientMotion {
+  let flow = options.flow;
   let halo = false;
   let raf = 0;
   let last = 0;
@@ -42,9 +46,11 @@ export function startAmbientMotion(map: MapLibreMap, { flow }: { flow: boolean }
     if (stopped) return;
     if (now - last >= STEP_MS) {
       last = now;
-      if (flow && map.getLayer("route-flow")) {
+      if (flow) {
         step = (step + 1) % FLOW_SEQUENCE.length;
-        map.setPaintProperty("route-flow", "line-dasharray", FLOW_SEQUENCE[step]);
+        for (const layer of FLOW_LAYERS) {
+          if (map.getLayer(layer)) map.setPaintProperty(layer, "line-dasharray", FLOW_SEQUENCE[step]);
+        }
       }
       if (halo && map.getLayer("selected-halo")) {
         const wave = 0.5 + 0.5 * Math.sin((now / HALO_PERIOD_MS) * Math.PI * 2);
@@ -69,6 +75,10 @@ export function startAmbientMotion(map: MapLibreMap, { flow }: { flow: boolean }
         map.setPaintProperty("selected-halo", "line-opacity", HALO_OPACITY);
         map.setPaintProperty("selected-halo", "line-width", HALO_WIDTH);
       }
+      schedule();
+    },
+    setFlow(active) {
+      flow = active;
       schedule();
     },
     stop() {

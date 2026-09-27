@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { Link } from "react-router-dom";
 import { describeError } from "../../api/errors";
-import { listProjects } from "../../api/projects";
+import { deleteProject, listProjects } from "../../api/projects";
 import { useAuth } from "../../auth/AuthContext";
 import { CountUp } from "../../components/CountUp";
 import { TopBar } from "../../components/TopBar";
@@ -12,7 +12,17 @@ function annotationCount(project: Project): number | null {
   return Array.isArray(project.features?.features) ? project.features.features.length : null;
 }
 
-function ProjectCard({ project, index }: { project: Project; index: number }) {
+function ProjectCard({
+  project,
+  index,
+  deleting,
+  onDelete,
+}: {
+  project: Project;
+  index: number;
+  deleting: boolean;
+  onDelete: (project: Project) => void;
+}) {
   const count = annotationCount(project);
   return (
     <li className="card project-card" style={{ "--i": index } as CSSProperties}>
@@ -36,6 +46,9 @@ function ProjectCard({ project, index }: { project: Project; index: number }) {
         <Link to={`/projects/${project.id}/edit`} className="btn-ghost">
           Edit
         </Link>
+        <button type="button" className="btn-ghost is-danger" disabled={deleting} onClick={() => onDelete(project)}>
+          {deleting ? "Deleting…" : "Delete"}
+        </button>
       </div>
     </li>
   );
@@ -45,6 +58,21 @@ export function DashboardPage() {
   const { user } = useAuth();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<Project["id"] | null>(null);
+
+  async function onDelete(project: Project) {
+    if (!window.confirm(`Delete “${project.name}”? This removes its imagery and annotations.`)) return;
+    setDeletingId(project.id);
+    setError(null);
+    try {
+      await deleteProject(project.id);
+      setProjects((current) => current?.filter((item) => item.id !== project.id) ?? current);
+    } catch (err) {
+      setError(describeError(err, "Could not delete the project"));
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -97,7 +125,13 @@ export function DashboardPage() {
         {projects && projects.length > 0 && (
           <ul className="project-grid">
             {projects.map((project, index) => (
-              <ProjectCard key={project.id} project={project} index={index} />
+              <ProjectCard
+                key={project.id}
+                project={project}
+                index={index}
+                deleting={deletingId === project.id}
+                onDelete={onDelete}
+              />
             ))}
           </ul>
         )}

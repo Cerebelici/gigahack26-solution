@@ -31,30 +31,22 @@ export type Project = {
   features?: FeatureCollection | null;
 };
 
-export type RoutePlanResponse = {
-  route: unknown | null;
-  detail?: string;
-};
-
-/** One selected map feature. `fid` is the `buildFieldData` index; the other fields match that feature. */
-export type RoutePlanTarget = {
-  fid: number;
-  label: string;
-  vineyardId: string | null;
-  rowId: string | null;
-  /** Annotation id when the feature has one. */
-  id: string | null;
-};
+export type Metres = [x: number, y: number];
 
 /**
- * Body for `POST /projects/:id/routes`.
- * `start` and `end` are the same EPSG:32635 point: the walk leaves it and returns to it.
- * `targets` are existing map features (`fid` from `buildFieldData`), not a second object model.
- * A route type fills the selection with the objects it references; manual selection can include any feature.
+ * Body for `POST /projects/:id/routes`, all in EPSG:32635 metres.
+ * The walk leaves `start` and returns to it, never entering an `obstacles` ring.
  */
 export type RoutePlanRequest = {
   routeType: RouteTypeId;
-  start: [number, number];
-  end: [number, number];
-  targets: RoutePlanTarget[];
+  obstacles: Metres[][];
+  start: Metres;
+  targets: Metres[];
+};
+
+export type RoutePlanResponse = {
+  route: { type: "LineString"; coordinates: Metres[] };
+  length_m: number;
+  /** Targets no walk reaches, as sent. */
+  unreachable: Metres[];
 };

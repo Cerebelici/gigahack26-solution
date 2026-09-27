@@ -1,10 +1,14 @@
 import { useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from "react";
 
-const ACCEPTED_EXTENSIONS = [".tif", ".tiff"];
+const ACCEPTED_EXTENSIONS = [".tif", ".tiff", ".zip"];
 
-function isGeoTiff(file: File): boolean {
+function isAcceptedImagery(file: File): boolean {
   const name = file.name.toLowerCase();
   return ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext));
+}
+
+function fileKind(file: File): "ZIP" | "TIF" {
+  return file.name.toLowerCase().endsWith(".zip") ? "ZIP" : "TIF";
 }
 
 function formatSize(bytes: number): string {
@@ -27,8 +31,8 @@ export function GeoTiffDropzone({ file, disabled, onChange, onReject }: GeoTiffD
 
   function selectFile(candidate: File | undefined) {
     if (!candidate) return;
-    if (!isGeoTiff(candidate)) {
-      onReject("Only .tif or .tiff files are supported.");
+    if (!isAcceptedImagery(candidate)) {
+      onReject("Only a GeoTIFF or a zip of GeoTIFFs is supported.");
       return;
     }
     onChange(candidate);
@@ -93,14 +97,14 @@ export function GeoTiffDropzone({ file, disabled, onChange, onReject }: GeoTiffD
             />
           </svg>
         </span>
-        <strong>Drop a GeoTIFF here or click to browse</strong>
-        <span className="muted upload-hint">Accepted formats: .tif, .tiff</span>
+        <strong>Drop a GeoTIFF or a zip of tiles here, or click to browse</strong>
+        <span className="muted upload-hint">Accepted formats: .tif, .tiff, .zip</span>
         <input ref={inputRef} type="file" accept={ACCEPTED_EXTENSIONS.join(",")} onChange={onInputChange} hidden />
       </div>
 
       {file && (
         <div className="upload-file">
-          <span className="upload-file-icon">TIF</span>
+          <span className="upload-file-icon">{fileKind(file)}</span>
           <div className="upload-file-meta">
             <strong title={file.name}>{file.name}</strong>
             <span className="muted">{formatSize(file.size)}</span>

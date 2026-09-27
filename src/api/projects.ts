@@ -24,6 +24,10 @@ export async function renameProject(id: Id, name: string): Promise<Project> {
   return res.data;
 }
 
+export async function deleteProject(id: Id): Promise<void> {
+  await api.delete(`/projects/${id}`);
+}
+
 export async function uploadRaster(id: Id, file: File, onProgress?: (fraction: number) => void): Promise<Raster> {
   const form = new FormData();
   form.append("file", file);

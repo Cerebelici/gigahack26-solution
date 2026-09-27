@@ -1,11 +1,8 @@
 import { useEffect, useState, type CSSProperties, type FormEvent } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { describeError } from "../../api/errors";
-import { processTif } from "../../api/processTif";
-import { createProject, getProject, renameProject, uploadRaster } from "../../api/projects";
+import { createProject, deleteProject, getProject, renameProject, uploadRaster } from "../../api/projects";
 import { TopBar } from "../../components/TopBar";
-import { setAnnotationOverlay } from "../map/annotationOverlay";
-import { annotationsToFeatures, extentFromBounds, parseAnnotationDocument } from "../map/tiffAnnotations";
 import type { Id, Project } from "../../types/project";
 import { GeoTiffDropzone } from "./GeoTiffDropzone";
 import "./projects.css";
@@ -79,6 +76,7 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
   const [name, setName] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(() => readError(location.state));
 
   useEffect(() => {
@@ -96,22 +94,15 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
     };
   }, [projectId]);
 
-  const busy = phase.kind !== "idle";
+  const busy = phase.kind !== "idle" || deleting;
   const trimmed = name.trim();
   const renamed = isEdit && project !== null && trimmed !== project.name;
   const canSubmit = !busy && trimmed !== "" && (!isEdit || (project !== null && (renamed || file !== null)));
 
   async function upload(id: Id, chosen: File) {
     setPhase({ kind: "uploading", fraction: 0 });
-    // Tiles still come from the project raster. /process-tif adds pixel annotations when the body is multipart.
-    const [raster, processed] = await Promise.all([
-      uploadRaster(id, chosen, (fraction) => setPhase({ kind: "uploading", fraction })),
-      processTif(chosen),
-    ]);
-    const features = processed.annotations
-      ? annotationsToFeatures(parseAnnotationDocument(processed.annotations), extentFromBounds(raster.boundsEpsg32635))
-      : null;
-    setAnnotationOverlay(id, features);
+    // The backend stores the file's annotations with the raster; the project view reads them back.
+    await uploadRaster(id, chosen, (fraction) => setPhase({ kind: "uploading", fraction }));
   }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -157,6 +148,20 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
     }
   }
 
+  async function onDelete() {
+    if (projectId === null || project === null) return;
+    if (!window.confirm(`Delete “${project.name}”? This removes its imagery and annotations.`)) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await deleteProject(projectId);
+      navigate("/", { replace: true });
+    } catch (err) {
+      setError(describeError(err, "Could not delete the project"));
+      setDeleting(false);
+    }
+  }
+
   const submitLabel = isEdit ? "Save changes" : file ? "Create and upload" : "Create project";
   const size = project ? rasterSize(project) : null;
 
@@ -184,7 +189,8 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
               <span className="section-label">{isEdit ? "Edit project" : "New project"}</span>
               <h1 className="card-title">{isEdit ? project?.name : "Create a project"}</h1>
               <p className="muted upload-lede">
-                A project holds one GeoTIFF orthophoto and the annotations stored for it.
+                A project holds one orthophoto and the annotations drawn on it. Upload a GeoTIFF, or a zip of
+                GeoTIFF tiles and the XML annotations for those tiles.
               </p>
             </div>
 
@@ -201,7 +207,7 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
             </label>
 
             <div className="field">
-              <span className="field-label">{project?.raster ? "Replace imagery" : "GeoTIFF imagery (optional)"}</span>
+              <span className="field-label">{project?.raster ? "Replace imagery" : "Imagery (optional)"}</span>
               {project?.raster && (
                 <div className="upload-file">
                   <span className="upload-file-icon">MAP</span>
@@ -231,12 +237,19 @@ function ProjectFormPage({ projectId }: { projectId: Id | null }) {
             )}
 
             <button type="submit" className="btn-primary upload-submit" disabled={!canSubmit}>
-              {busy && <span className="spinner" aria-hidden="true" />}
+              {phase.kind !== "idle" && <span className="spinner" aria-hidden="true" />}
               {phaseLabel(phase, submitLabel)}
             </button>
+            {isEdit && (
+              <button type="button" className="btn-ghost is-danger form-delete" disabled={busy} onClick={onDelete}>
+                {deleting ? "Deleting…" : "Delete project"}
+              </button>
+            )}
             {phase.kind === "uploading" && <UploadProgress fraction={phase.fraction} />}
             {phase.kind === "uploading" && (
-              <p className="muted form-note">Large GeoTIFFs are converted on the server; this can take several minutes.</p>
+              <p className="muted form-note">
+                Large uploads are combined and converted on the server; this can take several minutes.
+              </p>
             )}
           </form>
         )}

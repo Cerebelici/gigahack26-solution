@@ -1,48 +1,43 @@
 import { ROUTE_RULES, ROUTE_TYPES, type RouteTypeId } from "./routeTypes";
 import "../map/map.css";
 
+export type RouteResult = {
+  lengthM: number;
+  visited: number;
+  unreachable: number;
+};
+
 type RoutePlannerProps = {
   routeType: RouteTypeId | null;
   targetPick: boolean;
   targetCount: number;
   anchor: [number, number] | null;
+  /** The next map click sets the start and end point. */
+  placing: boolean;
+  planning: boolean;
+  result: RouteResult | null;
+  error: string | null;
+  /** Why the route cannot be planned yet, or null when it can. */
+  blocker: string | null;
+  /** Vineyard id the walk is limited to, or null for the whole field. */
+  block: string | null;
   onRouteType: (routeType: RouteTypeId) => void;
   onTargetPick: (pick: boolean) => void;
+  onPlace: (placing: boolean) => void;
   onPlan: () => void;
-};
-
-type RoutePlacementProps = {
-  routeType: RouteTypeId | null;
-  targetPick: boolean;
-  targetCount: number;
-  anchor: [number, number] | null;
-  onTargetPick: (pick: boolean) => void;
-  onEdit: () => void;
+  onClearRoute: () => void;
 };
 
 function targetMeta(count: number): string {
   return `${count} ${count === 1 ? "target" : "targets"}`;
 }
 
-function TargetPickButton({ pressed, onClick }: { pressed: boolean; onClick: (pick: boolean) => void }) {
+function StepHead({ step, title, done }: { step: number; title: string; done: boolean }) {
   return (
-    <button
-      type="button"
-      className={pressed ? "gbm-route-pick is-active" : "gbm-route-pick"}
-      aria-pressed={pressed}
-      onClick={() => onClick(!pressed)}
-    >
-      {pressed ? "Selecting targets" : "Select targets"}
-    </button>
-  );
-}
-
-function AnchorLine({ anchor }: { anchor: [number, number] | null }) {
-  if (!anchor) return null;
-  return (
-    <p className="gbm-route-point">
-      Start and end {anchor[0].toFixed(2)}, {anchor[1].toFixed(2)}
-    </p>
+    <div className={done ? "gbm-route-step is-done" : "gbm-route-step"}>
+      <span aria-hidden="true">{step}</span>
+      {title}
+    </div>
   );
 }
 
@@ -51,9 +46,17 @@ export function RoutePlanner({
   targetPick,
   targetCount,
   anchor,
+  placing,
+  planning,
+  result,
+  error,
+  blocker,
+  block,
   onRouteType,
   onTargetPick,
+  onPlace,
   onPlan,
+  onClearRoute,
 }: RoutePlannerProps) {
   return (
     <section className="gbm-route">
@@ -61,7 +64,9 @@ export function RoutePlanner({
         <h4>Route planning</h4>
         <span>{targetMeta(targetCount)}</span>
       </div>
+      {block && <p className="gbm-route-hint">This walk uses {block} only. Other blocks are left out.</p>}
 
+      <StepHead step={1} title="Route type" done={routeType !== null} />
       <ul className="gbm-route-list" role="radiogroup" aria-label="Route type">
         {ROUTE_TYPES.map((type) => {
           const active = type.id === routeType;
@@ -76,64 +81,96 @@ export function RoutePlanner({
               >
                 <span className="gbm-route-radio" aria-hidden="true" />
                 <span className="gbm-route-name">{type.name}</span>
-                <span className="gbm-route-targets">{type.targets}</span>
+                {active && <span className="gbm-route-targets">{type.targets}</span>}
               </button>
             </li>
           );
         })}
       </ul>
 
-      <TargetPickButton pressed={targetPick} onClick={onTargetPick} />
+      <StepHead step={2} title="Start and end point" done={anchor !== null} />
+      {anchor && (
+        <p className="gbm-route-point">
+          {anchor[0].toFixed(2)}, {anchor[1].toFixed(2)}
+        </p>
+      )}
+      <button
+        type="button"
+        className={placing ? "gbm-route-pick is-active" : "gbm-route-pick"}
+        aria-pressed={placing}
+        onClick={() => onPlace(!placing)}
+      >
+        {placing ? "Click the map…" : anchor ? "Move start point" : "Place start point on map"}
+      </button>
+      {placing && (
+        <p className="gbm-route-hint">
+          Click open ground: a headland, a path or an inter-row. The walk leaves this point and returns to it.
+        </p>
+      )}
+
+      <StepHead step={3} title="Targets" done={targetCount > 0} />
+      <button
+        type="button"
+        className={targetPick ? "gbm-route-pick is-active" : "gbm-route-pick"}
+        aria-pressed={targetPick}
+        onClick={() => onTargetPick(!targetPick)}
+      >
+        {targetPick ? "Done selecting" : "Add or remove targets"}
+      </button>
       {targetPick && (
         <p className="gbm-route-hint">
           Click an object to add or remove it. Inter-rows and row axes are not targets, except a disrupted row.
         </p>
       )}
-      <AnchorLine anchor={anchor} />
 
-      <button type="button" className="btn-primary gbm-route-submit" onClick={onPlan} disabled={routeType === null}>
-        Plan route
-      </button>
+      <details className="gbm-route-rules-box">
+        <summary>Route rules</summary>
+        <ul className="gbm-route-rules">
+          {ROUTE_RULES.map((rule) => (
+            <li key={rule}>{rule}</li>
+          ))}
+        </ul>
+      </details>
+      <div className="gbm-route-footer">
+        <button
+          type="button"
+          className="btn-primary gbm-route-submit"
+          onClick={onPlan}
+          disabled={blocker !== null || planning}
+          aria-describedby={blocker ? "route-blocker" : undefined}
+        >
+          {planning && <span className="spinner" aria-hidden="true" />}
+          {planning ? "Planning route…" : result ? "Plan again" : "Plan route"}
+        </button>
+        {blocker && !planning && (
+          <p id="route-blocker" className="gbm-route-hint">
+            {blocker}
+          </p>
+        )}
 
-      <ul className="gbm-route-rules">
-        {ROUTE_RULES.map((rule) => (
-          <li key={rule}>{rule}</li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-export function RoutePlacement({
-  routeType,
-  targetPick,
-  targetCount,
-  anchor,
-  onTargetPick,
-  onEdit,
-}: RoutePlacementProps) {
-  const name = ROUTE_TYPES.find((type) => type.id === routeType)?.name ?? "Route";
-  return (
-    <section className="gbm-route" aria-live="polite">
-      <div className="gbm-section-head">
-        <h4>{name}</h4>
-        <span>{targetMeta(targetCount)}</span>
+        {error && (
+          <div className="alert-error gbm-route-error" role="alert">
+            {error}
+          </div>
+        )}
+        {result && (
+          <div className="gbm-route-result" role="status">
+            <p>
+              <strong>{(result.lengthM / 1000).toFixed(2)} km</strong> walk · {result.visited}{" "}
+              {result.visited === 1 ? "stop" : "stops"}
+            </p>
+            {result.unreachable > 0 && (
+              <p className="gbm-route-warning">
+                {result.unreachable} {result.unreachable === 1 ? "target is" : "targets are"} out of reach (ringed on the
+                map).
+              </p>
+            )}
+            <button type="button" className="gbm-text-btn" onClick={onClearRoute}>
+              Clear route
+            </button>
+          </div>
+        )}
       </div>
-      {anchor ? (
-        <AnchorLine anchor={anchor} />
-      ) : (
-        <p className="gbm-route-hint">Click the map to place one point. That point is both the start and the end.</p>
-      )}
-      {targetPick && (
-        <p className="gbm-route-hint">
-          Clicks toggle targets. Inter-rows and row axes do nothing, except a disrupted row. Empty ground moves the
-          start and end.
-        </p>
-      )}
-      <TargetPickButton pressed={targetPick} onClick={onTargetPick} />
-      <button type="button" className="gbm-text-btn gbm-route-edit" onClick={onEdit}>
-        Route options
-      </button>
     </section>
   );
 }

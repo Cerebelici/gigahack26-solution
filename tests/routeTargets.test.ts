@@ -4,11 +4,16 @@ import { ROUTE_START_EPSG32635 } from "../src/features/projects/routeTypes";
 import {
   buildRoutePlanRequest,
   decideRouteClick,
+  featuresInBlock,
   isRowGap,
   isSelectableRouteTarget,
   orderClickedFids,
+  ROW_HALF_WIDTH_M,
   routeTargetFids,
+  rowStrip,
+  targetPoint,
 } from "../src/features/projects/routeTargets";
+import type { Geometry } from "geojson";
 
 function eq(actual: unknown, expected: unknown, message: string): void {
   const left = JSON.stringify(actual);
@@ -17,6 +22,15 @@ function eq(actual: unknown, expected: unknown, message: string): void {
 }
 
 const data = buildFieldData(sampleResult);
+// buildFieldData numbers features in order, and every fixture feature has a geometry.
+const geometries = new Map<number, Geometry>(
+  sampleResult.features.features.map((feature, fid) => [fid, feature.geometry as Geometry]),
+);
+const near = (actual: readonly number[] | null | undefined, expected: readonly number[], message: string) => {
+  if (!actual || actual.some((value, i) => Math.abs(value - expected[i]) > 1e-6)) {
+    throw new Error(`${message}\nexpected ${JSON.stringify(expected)}\nactual   ${JSON.stringify(actual)}`);
+  }
+};
 const gaps = data.items.filter(isRowGap);
 const waste = data.items.filter((item) => item.label === "waste");
 
@@ -35,18 +49,25 @@ eq(
 
 const wasteFid = waste[0]?.fid ?? -1;
 const gapFid = gaps[0]?.fid ?? -1;
-const plan = buildRoutePlanRequest("waste", data.items, [wasteFid, gapFid], [629500.12, 5220200.34]);
+const plan = buildRoutePlanRequest("waste", data.items, geometries, [wasteFid, gapFid], [629500.12, 5220200.34]);
 eq(plan.routeType, "waste", "route type");
 eq(plan.start, [629500.12, 5220200.34], "start");
-eq(plan.end, [629500.12, 5220200.34], "end matches start");
+eq(plan.obstacles.length, data.items.filter((item) => item.label === "row").length, "every row axis is an obstacle");
 eq(
-  plan.targets.map((target) => target.fid),
-  [gapFid, wasteFid].sort((a, b) => a - b),
-  "targets sorted by fid",
+  plan.targets,
+  [gapFid, wasteFid].sort((a, b) => a - b).map((fid) => targetPoint(geometries.get(fid) as Geometry)),
+  "targets are points, sorted by fid",
 );
-eq(plan.targets.find((target) => target.fid === gapFid)?.label, "row", "row gap label");
-eq(plan.targets.find((target) => target.fid === wasteFid)?.label, "waste", "waste label");
-eq(plan.targets.find((target) => target.fid === gapFid)?.rowId, "V01-R03", "row id");
+
+const gapLine = geometries.get(gapFid);
+if (gapLine?.type !== "LineString") throw new Error("row gap is not a line");
+const [[ax, ay], [bx, by]] = [gapLine.coordinates[0], gapLine.coordinates[gapLine.coordinates.length - 1]];
+near(targetPoint(gapLine), [(ax + bx) / 2, (ay + by) / 2], "a row target is the middle of the row");
+
+const strip = rowStrip([[0, 0], [10, 0]]);
+eq(strip, [[0, ROW_HALF_WIDTH_M], [10, ROW_HALF_WIDTH_M], [10, -ROW_HALF_WIDTH_M], [0, -ROW_HALF_WIDTH_M]], "row strip");
+eq(rowStrip([[1, 1], [1, 1]]), null, "a row without length has no strip");
+near(targetPoint({ type: "Polygon", coordinates: [[[0, 0], [4, 0], [4, 2], [0, 2], [0, 0]]] }), [2, 1], "box centre");
 
 const regular = data.items.find((item) => item.label === "row" && item.props.row_structure === "regular");
 const unassessable = data.items.find((item) => item.label === "row" && item.props.row_structure === "unassessable");
@@ -98,10 +119,16 @@ eq(
   "inspect still prefers the row",
 );
 
-const withArea = buildRoutePlanRequest("waste", data.items, [rowAxis.fid, interrow.fid, gapFid], [629500, 5220200]);
+const withArea = buildRoutePlanRequest(
+  "waste",
+  data.items,
+  geometries,
+  [rowAxis.fid, interrow.fid, gapFid],
+  [629500, 5220200],
+);
 eq(
-  withArea.targets.map((target) => target.fid),
-  [gapFid],
+  withArea.targets,
+  [targetPoint(gapLine)],
   "payload keeps the disrupted row and drops the inter-row and intact axis",
 );
 
@@ -150,15 +177,28 @@ eq(
   "looking at a row axis",
 );
 
-const withCanopy = buildRoutePlanRequest("waste", data.items, [canopy.fid], [629500, 5220200]);
-eq(withCanopy.targets[0]?.label, "vineyard", "canopy label");
-eq(withCanopy.targets[0]?.vineyardId, canopy.block, "canopy block");
-eq(withCanopy.targets[0]?.rowId, null, "canopy has no row");
+const withCanopy = buildRoutePlanRequest("waste", data.items, geometries, [canopy.fid], [629500, 5220200]);
+eq(withCanopy.targets, [targetPoint(geometries.get(canopy.fid) as Geometry)], "a canopy target is its centre");
 eq(
   decideRouteClick({ pick: false, place: false }, [wasteFid], data.items),
   { type: "inspect", fid: wasteFid },
   "inspect",
 );
+
+const v01 = featuresInBlock(data.items, "V01");
+eq(
+  routeTargetFids("inspection", v01),
+  gaps.filter((item) => item.block === "V01").map((item) => item.fid),
+  "a vineyard keeps its own row gaps",
+);
+eq(routeTargetFids("waste", v01), [], "a vineyard without waste has no waste targets");
+const v01Plan = buildRoutePlanRequest("full", v01, geometries, routeTargetFids("full", v01), [629500, 5220200]);
+eq(
+  v01Plan.obstacles.length,
+  data.items.filter((item) => item.label === "row" && item.block === "V01").length,
+  "obstacles are the rows of that vineyard",
+);
+eq(featuresInBlock(data.items, null).length, data.items.length, "no vineyard keeps the whole field");
 
 const [x, y] = ROUTE_START_EPSG32635;
 const roundTrip = fromLngLat(toLngLat([x, y]));

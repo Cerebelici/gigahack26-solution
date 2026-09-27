@@ -1,6 +1,5 @@
 import type { LineString, Polygon, Position } from "geojson";
 import { parseProcessTifResponse } from "../src/api/tiffMultipart";
-import { annotationOverlay, setAnnotationOverlay } from "../src/features/map/annotationOverlay";
 import { buildFieldData, toLngLat } from "../src/features/map/project";
 import {
   annotationsToFeatures,
@@ -209,12 +208,6 @@ const legacy = parseProcessTifResponse(
   concat([new TextEncoder().encode(JSON.stringify({ id: "raster", tileUrl: "/tiles" }))]).buffer,
 );
 if (legacy.annotations !== null || legacy.tiff !== null) fail("JSON tile response should not create an overlay");
-
-setAnnotationOverlay("parcel", features);
-const storedOverlay = annotationOverlay("parcel");
-if (!storedOverlay || storedOverlay.features.length !== 4) fail("overlay was not stored");
-setAnnotationOverlay("parcel", null);
-if (annotationOverlay("parcel")) fail("previous annotation overlay stuck after a TIFF with no annotations");
 
 let threw = false;
 try {
