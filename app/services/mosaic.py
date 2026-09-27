@@ -44,6 +44,13 @@ logger = logging.getLogger(__name__)
 TIFF_SUFFIXES = {".tif", ".tiff"}
 MAX_SIDE = 120_000
 MAX_ZIP_BYTES = 8 * 1024**3
+# Temporary. A magenta frame on each source tile inside the mosaic, wide enough to survive
+# overview downsampling. Remove when those edges no longer need to show on the map.
+SOURCE_BORDER_COLOR = (255, 0, 255)
+
+
+def source_border_px(width: int, height: int) -> int:
+    return max(1, min(width, height) // 48)
 
 
 @dataclass(frozen=True)
@@ -366,6 +373,7 @@ def _paste_aligned(src: DatasetReader, dst: DatasetWriter, col: int, row: int) -
     window = Window(col, row, src.width, src.height)
     dst.write(_read_rgb(src), indexes=(1, 2, 3), window=window)
     dst.write(np.full((src.height, src.width), 255, dtype=np.uint8), indexes=4, window=window)
+    _frame(dst, col, row, src.width, src.height)
 
 
 def _paste_reprojected(src: DatasetReader, dst: DatasetWriter, dst_crs: CRS) -> None:
@@ -400,6 +408,24 @@ def _paste_reprojected(src: DatasetReader, dst: DatasetWriter, dst_crs: CRS) -> 
         )
         dst.write(array, index, window=window)
     dst.write(np.full((int(window.height), int(window.width)), 255, dtype=np.uint8), 4, window=window)
+    _frame(dst, col0, row0, col1 - col0, row1 - row0)
+
+
+def _frame(dst: rasterio.DatasetWriter, col: int, row: int, width: int, height: int) -> None:
+    """Paint the edge of one pasted source tile. The interior is left as copied."""
+    px = min(source_border_px(width, height), width, height)
+
+    def fill(left: int, top: int, box_width: int, box_height: int) -> None:
+        if box_width < 1 or box_height < 1:
+            return
+        patch = np.empty((3, box_height, box_width), dtype=np.uint8)
+        patch[0], patch[1], patch[2] = SOURCE_BORDER_COLOR
+        dst.write(patch, indexes=(1, 2, 3), window=Window(left, top, box_width, box_height))
+
+    fill(col, row, width, px)
+    fill(col, row + height - px, width, px)
+    fill(col, row, px, height)
+    fill(col + width - px, row, px, height)
 
 
 def _read_rgb(src: DatasetReader) -> np.ndarray:

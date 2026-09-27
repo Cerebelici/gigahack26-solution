@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from app.main import app
 from app.services import cvat_annotations, tif
+from app.services.mosaic import SOURCE_BORDER_COLOR, source_border_px
 from tests.test_process_tif import (
     COLOR,
     PIXEL_M,
@@ -140,18 +141,21 @@ def test_update_me_requires_auth(db_conn):
 def test_create_and_update_project(token, project):
     assert project["name"] == "Sireț3 north"
     assert project["raster"] is None
-    assert project["features"]["type"] == "FeatureCollection"
-    assert project["features"]["features"] == []
+    assert "features" not in project
 
     res = client.patch(f"/projects/{project['id']}", json={"name": "Renamed"}, headers=auth(token))
     assert res.status_code == 200
     assert res.json()["name"] == "Renamed"
+    assert "features" not in res.json()
 
     got = client.get(f"/projects/{project['id']}", headers=auth(token))
     assert got.status_code == 200 and got.json()["name"] == "Renamed"
+    assert got.json()["features"]["type"] == "FeatureCollection"
+    assert got.json()["features"]["features"] == []
 
     listed = client.get("/projects", headers=auth(token)).json()
     assert [p["id"] for p in listed] == [project["id"]]
+    assert "features" not in listed[0]
 
 
 def test_projects_are_private_to_their_owner(project):
@@ -258,7 +262,11 @@ def test_raster_upload_places_catalog_shapes_by_location_not_file_name(token, pr
     monkeypatch.setattr(cvat_annotations, "catalog", lambda: CATALOG)
     assert upload_raster(token, project["id"], tile_geotiff()).status_code == 200
 
-    features = client.get(f"/projects/{project['id']}", headers=auth(token)).json()["features"]["features"]
+    opened = client.get(f"/projects/{project['id']}", headers=auth(token)).json()
+    listed = client.get("/projects", headers=auth(token)).json()
+    assert "features" not in listed[0]
+
+    features = opened["features"]["features"]
     by_label = {feature["properties"]["label"]: feature for feature in features}
     assert sorted(by_label) == ["row", "vineyard", "waste"], "invalid and off-raster shapes are skipped"
 
@@ -490,10 +498,14 @@ def test_adjacent_zip_tiles_share_an_edge(token, project, upload_dir):
     assert res.status_code == 200, res.text
     with rasterio.open(upload_dir / res.json()["id"] / "raster.tif") as ds:
         assert (ds.width, ds.height) == (size * 2, size)
-        assert tuple(int(v) for v in ds.read(window=Window(size - 1, 2, 1, 1))[:3, 0, 0]) == LEFT_COLOR
-        assert tuple(int(v) for v in ds.read(window=Window(size, 2, 1, 1))[:3, 0, 0]) == RIGHT_COLOR
-        assert int(ds.read(4, window=Window(size - 1, 2, 1, 1))[0, 0]) == 255
-        assert int(ds.read(4, window=Window(size, 2, 1, 1))[0, 0]) == 255
+        border = source_border_px(size, size)
+        mid = size // 2
+        assert tuple(int(v) for v in ds.read(window=Window(size - 1 - border, mid, 1, 1))[:3, 0, 0]) == LEFT_COLOR
+        assert tuple(int(v) for v in ds.read(window=Window(size + border, mid, 1, 1))[:3, 0, 0]) == RIGHT_COLOR
+        assert tuple(int(v) for v in ds.read(window=Window(size - 1, mid, 1, 1))[:3, 0, 0]) == SOURCE_BORDER_COLOR
+        assert tuple(int(v) for v in ds.read(window=Window(size, mid, 1, 1))[:3, 0, 0]) == SOURCE_BORDER_COLOR
+        assert int(ds.read(4, window=Window(size - 1, mid, 1, 1))[0, 0]) == 255
+        assert int(ds.read(4, window=Window(size, mid, 1, 1))[0, 0]) == 255
 
 
 def test_zip_without_a_geotiff_is_rejected(token, project, upload_dir):

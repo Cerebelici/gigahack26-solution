@@ -92,25 +92,31 @@ endpoints return `404` for projects the caller does not own. Validation errors a
 
 ### Projects
 
-- 🔒 `POST /projects` `{ name }` → `201` project
-- 🔒 `GET /projects` → project[] (most recently updated first)
-- 🔒 `GET /projects/{id}` → project
-- 🔒 `PATCH /projects/{id}` `{ name }` → project
+- 🔒 `POST /projects` `{ name }` → `201` project summary
+- 🔒 `GET /projects` → project summary[] (most recently updated first). No annotations.
+- 🔒 `GET /projects/{id}` → project, including its annotations. This is the load used when opening a project.
+- 🔒 `PATCH /projects/{id}` `{ name }` → project summary
 - 🔒 `DELETE /projects/{id}` → `204` with an empty body. Removes the project, its annotations, and the imagery files. `404` for a project the caller does not own.
+
+A summary, returned by create, list, and rename:
 
 ```json
 {
   "id": 1,
   "name": "Sireț3 north",
   "raster": null,
-  "features": { "type": "FeatureCollection", "crs": { ... EPSG:32635 ... }, "features": [] },
   "createdAt": "...",
   "updatedAt": "..."
 }
 ```
 
+Opening a project adds `features`, a FeatureCollection of that project's annotations (see below):
+
+```json
+{ "features": { "type": "FeatureCollection", "crs": { "...": "EPSG:32635" }, "features": [] } }
+```
+
 `raster` is `null` or `{ id, tileUrl, boundsEpsg32635: [minX, minY, maxX, maxY], minzoom, maxzoom }`.
-`features` are the project's annotations (see below).
 
 ### Raster upload
 
