@@ -343,10 +343,11 @@ def _save_raster(
 @router.post("/{project_id}/raster")
 async def upload_raster(
     request: Request,
-    file: UploadFile | None = File(None),
+    file: list[UploadFile] = File(default=[]),
     project: Project = Depends(owned_project),
     db: Session = Depends(get_db),
 ) -> RasterOut:
+    """One GeoTIFF, or one or more zips. Every tile is mosaicked into a single map."""
     try:
         stored, items = await store_project_imagery(file)
     except RasterError as exc:

@@ -432,6 +432,47 @@ def test_zip_of_tiles_becomes_one_map_with_annotations(token, project, upload_di
     assert [feature["properties"]["vineyard_id"] for feature in features] == ["V99"]
 
 
+def test_several_zips_become_one_map(token, project, upload_dir):
+    right_west = ZIP_WEST + ZIP_SIZE + ZIP_GAP
+    left_xml = """<?xml version="1.0" encoding="utf-8"?>
+    <annotations><image name="left.tif" width="32" height="32">
+      <polygon label="vineyard" points="2,2;8,2;8,8"><attribute name="vineyard_id">WEST</attribute></polygon>
+    </image></annotations>"""
+    right_xml = """<?xml version="1.0" encoding="utf-8"?>
+    <annotations><image name="right.tif" width="32" height="32">
+      <polyline label="row" points="0,10;31,10">
+        <attribute name="vineyard_id">V02</attribute>
+        <attribute name="row_id">V02-R01</attribute>
+        <attribute name="row_structure">regular</attribute>
+      </polyline>
+    </image></annotations>"""
+    res = client.post(
+        f"/projects/{project['id']}/raster",
+        files=[
+            ("file", ("west.zip", zip_bytes({"left.tif": solid_geotiff(ZIP_WEST, ZIP_NORTH, LEFT_COLOR), "a.xml": left_xml.encode()}), "application/zip")),
+            ("file", ("east.zip", zip_bytes({"right.tif": solid_geotiff(right_west, ZIP_NORTH, RIGHT_COLOR), "b.xml": right_xml.encode()}), "application/zip")),
+        ],
+        headers=auth(token),
+    )
+    assert res.status_code == 200, res.text
+    raster = res.json()
+    assert raster["boundsEpsg32635"] == pytest.approx(
+        [ZIP_WEST, ZIP_NORTH - ZIP_SIZE, right_west + ZIP_SIZE, ZIP_NORTH], abs=1e-3
+    )
+    with rasterio.open(upload_dir / raster["id"] / "raster.tif") as ds:
+        assert (ds.width, ds.height) == (ZIP_SIZE + ZIP_GAP + ZIP_SIZE, ZIP_SIZE)
+        assert tuple(int(v) for v in ds.read(window=Window(4, 4, 1, 1))[:3, 0, 0]) == LEFT_COLOR
+        assert tuple(int(v) for v in ds.read(window=Window(ZIP_SIZE + ZIP_GAP + 10, 4, 1, 1))[:3, 0, 0]) == RIGHT_COLOR
+
+    features = client.get(f"/projects/{project['id']}/annotations", headers=auth(token)).json()["features"]
+    by_label = {feature["properties"]["label"]: feature for feature in features}
+    assert by_label["vineyard"]["properties"]["vineyard_id"] == "WEST"
+    assert by_label["row"]["properties"]["row_id"] == "V02-R01"
+    assert by_label["row"]["geometry"]["coordinates"] == [
+        pytest.approx(p, abs=1e-3) for p in [[right_west, ZIP_NORTH - 10], [right_west + 31, ZIP_NORTH - 10]]
+    ]
+
+
 def test_adjacent_zip_tiles_share_an_edge(token, project, upload_dir):
     pixel = 0.025
     size = 64

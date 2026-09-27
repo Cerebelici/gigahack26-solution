@@ -115,17 +115,18 @@ endpoints return `404` for projects the caller does not own. Validation errors a
 ### Raster upload
 
 🔒 `POST /projects/{id}/raster`, `multipart/form-data` with the file in `file` → the raster object above.
-Send one GeoTIFF, or a `.zip` of GeoTIFFs plus the CVAT XML files for those tiles. A zip is mosaicked by
-each TIFF's coordinates into one orthophoto: neighbouring tiles meet on the ground, and the gap between
-them stays transparent. The upload becomes the project's current raster, stored in `UPLOAD_DIR/<raster id>/`
-and converted to a COG with overviews. Zooming still requests `{z}/{x}/{y}` tiles of that one image.
+Send one GeoTIFF, or one or more `.zip` files of GeoTIFFs plus the CVAT XML files for those tiles.
+Repeat the `file` form field for each zip. Every tile, from every zip, is mosaicked by its coordinates
+into one orthophoto: neighbouring tiles meet on the ground, and the gap between them stays transparent.
+The upload becomes the project's current raster, stored in `UPLOAD_DIR/<raster id>/` and converted to a
+COG with overviews. Zooming still requests `{z}/{x}/{y}` tiles of that one image.
 
-Shapes from the zip's XML are stored as the project's annotations, in the mosaic's pixel grid, replacing the
-previous ones. An XML `<image name>` matches a TIFF by file name (`left.tif`, or `tiles/left.tif`). A single
-GeoTIFF still takes the shapes in `annotations.xml` that lie on it, placed by where their tile
-(`siret3_rNNN_cNNN.tif`) sits on the challenge grid. A shape with an unusable attribute is stored without its
-attributes; one with unusable geometry is skipped and logged. An upload with no shapes leaves the existing
-annotations alone.
+Shapes from each zip's XML are stored as the project's annotations, in the mosaic's pixel grid, replacing
+the previous ones. An XML `<image name>` matches a TIFF from the same zip by file name (`left.tif`, or
+`tiles/left.tif`). A single GeoTIFF still takes the shapes in `annotations.xml` that lie on it, placed by
+where their tile (`siret3_rNNN_cNNN.tif`) sits on the challenge grid. A shape with an unusable attribute is
+stored without its attributes; one with unusable geometry is skipped and logged. An upload with no shapes
+leaves the existing annotations alone.
 
 Projects uploaded before this have none. Fill them once with `python -m app.backfill_annotations`; it only
 touches projects without annotations.

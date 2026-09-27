@@ -1,7 +1,8 @@
-"""Combine a zip of georeferenced tiles into one orthophoto.
+"""Combine georeferenced tiles from one or more zips into one orthophoto.
 
-Each TIFF is pasted by its CRS and geotransform, so neighbouring tiles meet on the ground.
-CVAT shapes from XML files in the same zip are moved into that mosaic's pixel grid.
+Each TIFF is pasted by its CRS and geotransform, so neighbouring tiles meet on the ground
+whether they arrived in the same zip or in separate ones. CVAT shapes from XML files in a
+zip are moved into that mosaic's pixel grid, and they match the tiles from that same zip.
 Empty space between tiles is transparent.
 """
 
@@ -9,6 +10,7 @@ import logging
 import math
 import shutil
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -31,6 +33,8 @@ from app.services.tif import TIFF_MAGIC_SIZE, RasterError, StoredRaster, is_tiff
 
 
 class _Upload(Protocol):
+    filename: str | None
+
     async def read(self, size: int = -1) -> bytes: ...
 
     async def seek(self, offset: int) -> Any: ...
@@ -52,66 +56,117 @@ def is_zip(header: bytes) -> bool:
     return header.startswith(b"PK")
 
 
-async def store_project_imagery(file: _Upload | None) -> tuple[StoredRaster, list[dict[str, Any]] | None]:
-    """Store one GeoTIFF, or mosaic a zip of them.
+async def store_project_imagery(
+    files: Sequence[_Upload] | None,
+) -> tuple[StoredRaster, list[dict[str, Any]] | None]:
+    """Store one GeoTIFF, or mosaic every tile from one or more zips into one map.
 
-    The annotation list is None for a single GeoTIFF, which still takes shapes from the
-    repository catalog. A zip returns the shapes from its own XML files, in mosaic pixels.
+    The annotation list is None for GeoTIFFs with no zip, which still take shapes from the
+    repository catalog. Zips return the shapes from their own XML files, in mosaic pixels.
+    A shape matches a tile from the same zip.
     """
-    if file is None:
+    uploads = [file for file in files or [] if file is not None]
+    if not uploads:
         raise RasterError("No file uploaded. Send a GeoTIFF or a zip of GeoTIFFs in the 'file' form field.")
-    header = await file.read(TIFF_MAGIC_SIZE)
-    if not header:
-        raise RasterError("Uploaded file is empty.")
-    await file.seek(0)
-    if is_tiff(header):
-        return await tif.store_raster(file), None
-    if is_zip(header):
-        return await _store_mosaic(file)
-    raise RasterError("Send a GeoTIFF (.tif, .tiff) or a zip of GeoTIFFs and their CVAT XML files.")
+    kinds: list[str] = []
+    for upload in uploads:
+        header = await upload.read(TIFF_MAGIC_SIZE)
+        if not header:
+            raise RasterError("Uploaded file is empty.")
+        await upload.seek(0)
+        if is_tiff(header):
+            kinds.append("tiff")
+        elif is_zip(header):
+            kinds.append("zip")
+        else:
+            raise RasterError("Send a GeoTIFF (.tif, .tiff) or a zip of GeoTIFFs and their CVAT XML files.")
+    if len(uploads) == 1 and kinds[0] == "tiff":
+        return await tif.store_raster(uploads[0]), None
+    return await _store_mosaic(list(zip(uploads, kinds, strict=True)))
 
 
-async def _store_mosaic(src: _Upload) -> tuple[StoredRaster, list[dict[str, Any]]]:
+async def _store_mosaic(parts: list[tuple[_Upload, str]]) -> tuple[StoredRaster, list[dict[str, Any]] | None]:
     raster_id = uuid4().hex
     folder = tif.UPLOAD_DIR / raster_id
     folder.mkdir(parents=True)
-    zip_path = folder / "upload.zip"
+    saved: list[tuple[Path, str]] = []
     try:
-        await tif.save_upload(src, zip_path)
-        return await run_in_threadpool(_mosaic_zip, raster_id, zip_path, folder)
+        for index, (upload, kind) in enumerate(parts):
+            path = folder / _saved_name(upload.filename, index, kind)
+            await tif.save_upload(upload, path)
+            saved.append((path, kind))
+        has_zip = any(kind == "zip" for _, kind in saved)
+        stored, items = await run_in_threadpool(_mosaic_saved, raster_id, saved, folder)
+        # Bare GeoTIFFs still take shapes from the catalog. A zip brings its own.
+        return stored, items if has_zip else None
     except BaseException:
         shutil.rmtree(folder, ignore_errors=True)
         raise
 
 
-def _mosaic_zip(raster_id: str, zip_path: Path, folder: Path) -> tuple[StoredRaster, list[dict[str, Any]]]:
+def _saved_name(filename: str | None, index: int, kind: str) -> str:
+    if kind == "zip":
+        return f"upload-{index}.zip"
+    candidate = Path(filename or "").name
+    if candidate.lower().endswith((".tif", ".tiff")) and _safe_member(candidate) is not None:
+        return f"{index}-{candidate}"
+    return f"{index}-tile.tif"
+
+
+def _mosaic_saved(
+    raster_id: str, saved: list[tuple[Path, str]], folder: Path
+) -> tuple[StoredRaster, list[dict[str, Any]]]:
     extract = folder / "parts"
     extract.mkdir()
-    tiff_paths, xml_paths = _extract(zip_path, extract)
-    if not tiff_paths:
-        raise RasterError("Zip does not contain a GeoTIFF.")
-    mosaic_path = folder / "mosaic.tif"
-    tiles = _open_tiles(tiff_paths)
+    budget = _ByteBudget(MAX_ZIP_BYTES)
+    bundles: list[tuple[list[_Tile], list[Path]]] = []
     try:
+        for index, (path, kind) in enumerate(saved):
+            dest = extract / str(index)
+            dest.mkdir()
+            if kind == "zip":
+                tiff_paths, xml_paths = _extract(path, dest, budget)
+                path.unlink(missing_ok=True)
+            else:
+                target = dest / path.name.split("-", 1)[-1]
+                path.replace(target)
+                tiff_paths, xml_paths = [target], []
+            if tiff_paths:
+                bundles.append((_open_tiles(tiff_paths), xml_paths))
+        tiles = [tile for bundle_tiles, _ in bundles for tile in bundle_tiles]
+        if not tiles:
+            raise RasterError("Zip does not contain a GeoTIFF.")
+        mosaic_path = folder / "mosaic.tif"
         _write_mosaic(tiles, mosaic_path)
         stored = tif._prepare(raster_id, mosaic_path, folder / tif.RASTER_FILENAME)
-        items = _placed_items(tiles, xml_paths, stored)
+        items = [item for bundle_tiles, xml_paths in bundles for item in _placed_items(bundle_tiles, xml_paths, stored)]
     finally:
-        for tile in tiles:
-            tile.dataset.close()
+        for bundle_tiles, _ in bundles:
+            for tile in bundle_tiles:
+                tile.dataset.close()
     shutil.rmtree(extract, ignore_errors=True)
-    zip_path.unlink(missing_ok=True)
     return stored, items
 
 
-def _extract(zip_path: Path, dest: Path) -> tuple[list[Path], list[Path]]:
+class _ByteBudget:
+    """Shared cap on the bytes read out of every zip in one upload."""
+
+    def __init__(self, limit: int) -> None:
+        self.left = limit
+
+    def take(self, amount: int) -> None:
+        if amount > self.left:
+            raise RasterError("Zip is too large to mosaic.")
+        self.left -= amount
+
+
+def _extract(zip_path: Path, dest: Path, budget: _ByteBudget) -> tuple[list[Path], list[Path]]:
     tiffs: list[Path] = []
     xmls: list[Path] = []
     try:
         archive = zipfile.ZipFile(zip_path)
     except zipfile.BadZipFile as exc:
         raise RasterError("Uploaded file is not a valid zip.") from exc
-    total = 0
     with archive:
         root = dest.resolve()
         for info in archive.infolist():
@@ -123,18 +178,20 @@ def _extract(zip_path: Path, dest: Path) -> tuple[list[Path], list[Path]]:
             suffix = relative.suffix.lower()
             if suffix not in TIFF_SUFFIXES and suffix != ".xml":
                 continue
-            if info.file_size > MAX_ZIP_BYTES:
+            if info.file_size > budget.left:
                 raise RasterError("Zip is too large to mosaic.")
             target = (dest / relative).resolve()
             if not target.is_relative_to(root):
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
+            written = 0
             with archive.open(info) as src, target.open("wb") as out:
                 while chunk := src.read(1024 * 1024):
-                    total += len(chunk)
-                    if total > MAX_ZIP_BYTES:
+                    written += len(chunk)
+                    if written > budget.left:
                         raise RasterError("Zip is too large to mosaic.")
                     out.write(chunk)
+            budget.take(written)
             if suffix in TIFF_SUFFIXES:
                 tiffs.append(target)
             else:

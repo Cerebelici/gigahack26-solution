@@ -108,6 +108,58 @@ def test_two_point_row_is_not_an_obstacle():
     assert plan.length_m == pytest.approx(4)
 
 
+def test_inter_row_is_walked_down_the_middle():
+    def strip(x):
+        return list(LineString([(x, 0), (x, 40)]).buffer(0.6, cap_style="flat").exterior.coords)
+
+    rows = [strip(0), strip(2.5), strip(5)]
+    targets = [(0, 10), (2.5, 25), (0, 30)]
+    plan = plan_route(rows, (-3.0, -2.0), targets)
+
+    assert plan.unreachable == ()
+    walls = unary_union([Polygon(ring).buffer(-1e-3) for ring in rows])
+    assert not plan.route.intersects(walls)
+    for target in targets:
+        assert plan.route.distance(Point(target)) <= 2
+
+    # Away from the mouths, the part of the walk inside this alley is its centre line.
+    distance = 0.0
+    while distance <= plan.route.length:
+        point = plan.route.interpolate(distance)
+        if 1.0 < point.y < 39.0 and -0.5 < point.x < 3.2:
+            assert point.x == pytest.approx(1.25, abs=0.05)
+        distance += 0.25
+
+
+def test_diagonal_inter_row_is_walked_down_the_middle():
+    axis = (1 / math.sqrt(2), 1 / math.sqrt(2))
+    normal = (-axis[1], axis[0])
+
+    def strip(shift):
+        start = (normal[0] * shift, normal[1] * shift)
+        end = (start[0] + 40, start[1] + 40)
+        return list(LineString([start, end]).buffer(0.6, cap_style="flat").exterior.coords)
+
+    rows = [strip(0), strip(2.5)]
+    targets = [(10, 10), (20, 20), (20 + normal[0] * 2.5, 20 + normal[1] * 2.5)]
+    plan = plan_route(rows, (-4.0, -4.0), targets)
+
+    assert plan.unreachable == ()
+    walls = unary_union([Polygon(ring).buffer(-1e-3) for ring in rows])
+    assert not plan.route.intersects(walls)
+    for target in targets:
+        assert plan.route.distance(Point(target)) <= 2
+
+    distance = 0.0
+    while distance <= plan.route.length:
+        x, y = plan.route.interpolate(distance).coords[0]
+        along = x * axis[0] + y * axis[1]
+        shift = x * normal[0] + y * normal[1]
+        if 5.0 < along < 35.0 and -0.5 < shift < 3.0:
+            assert shift == pytest.approx(1.25, abs=0.08)
+        distance += 0.25
+
+
 def test_target_sealed_off_by_obstacles_is_unreachable():
     # The bars overlap at the corners, so the pocket is closed. The target is
     # outside every bar; the start cannot reach it without crossing one.
@@ -163,3 +215,67 @@ def test_buffered_rows_at_utm_coordinates_do_not_leak_through_the_visibility_gra
     assert not plan.route.intersects(walls)
     for target in targets:
         assert plan.route.distance(Point(target)) <= 2.0
+
+
+# Row axes from vineyard V08, the forty closest to the sample start. The visibility
+# graph's shortest path cuts through these rows; a walk around them still reaches
+# every axis.
+V08_ROWS = [
+    [(629515.573, 5220252.12), (629517.613, 5220249.6)],
+    [(629504.0, 5220239.657), (629535.09, 5220198.4)],
+    [(629515.665, 5220248.035), (629553.068, 5220198.4)],
+    [(629514.448, 5220244.65), (629549.3, 5220198.4)],
+    [(629513.65, 5220241.312), (629545.988, 5220198.4)],
+    [(629517.79, 5220249.6), (629555.2, 5220199.955)],
+    [(629518.9, 5220252.8), (629521.493, 5220249.6)],
+    [(629521.085, 5220249.6), (629555.2, 5220204.328)],
+    [(629521.435, 5220254.067), (629524.005, 5220250.893)],
+    [(629515.052, 5220234.34), (629542.135, 5220198.4)],
+    [(629524.225, 5220254.865), (629528.448, 5220249.65)],
+    [(629524.74, 5220249.6), (629555.2, 5220209.177)],
+    [(629513.588, 5220231.95), (629538.743, 5220198.57)],
+    [(629528.188, 5220249.6), (629554.56, 5220214.603)],
+    [(629529.458, 5220256.585), (629535.113, 5220249.6)],
+    [(629511.21, 5220225.878), (629531.915, 5220198.4)],
+    [(629531.78, 5220249.6), (629555.2, 5220218.523)],
+    [(629534.93, 5220249.6), (629555.2, 5220222.7)],
+    [(629534.99, 5220258.613), (629541.945, 5220250.02)],
+    [(629519.517, 5220282.595), (629546.238, 5220249.6)],
+    [(629538.225, 5220249.6), (629555.2, 5220227.072)],
+    [(629528.243, 5220277.843), (629551.113, 5220249.6)],
+    [(629541.795, 5220249.6), (629555.2, 5220231.81)],
+    [(629530.188, 5220279.593), (629554.475, 5220249.6)],
+    [(629545.405, 5220249.6), (629553.762, 5220238.508)],
+    [(629522.56, 5220294.185), (629555.2, 5220253.878)],
+    [(629546.598, 5220249.6), (629555.2, 5220238.182)],
+    [(629550.113, 5220249.6), (629555.2, 5220242.848)],
+    [(629551.145, 5220249.6), (629555.2, 5220244.22)],
+    [(629551.588, 5220245.46), (629554.797, 5220241.197)],
+    [(629529.27, 5220296.457), (629539.652, 5220283.633)],
+    [(629551.608, 5220263.018), (629555.2, 5220258.58)],
+    [(629528.255, 5220300.8), (629539.935, 5220286.375)],
+    [(629555.2, 5220247.805), (629593.8, 5220198.4)],
+    [(629555.2, 5220253.808), (629558.257, 5220249.6)],
+    [(629555.2, 5220258.295), (629561.517, 5220249.6)],
+    [(629555.2, 5220242.733), (629589.835, 5220198.4)],
+    [(629555.2, 5220263.07), (629564.985, 5220249.6)],
+    [(629555.2, 5220236.758), (629585.17, 5220198.4)],
+    [(629557.637, 5220249.35), (629597.443, 5220198.4)],
+]
+
+
+def test_targets_between_rows_are_reached_by_walking_around_them():
+    lines = [LineString(row) for row in V08_ROWS]
+    obstacles = [list(line.buffer(0.6, cap_style="flat").exterior.coords) for line in lines]
+    start = (629504.7, 5220250.75)
+    targets = [tuple(line.interpolate(0.5, normalized=True).coords[0]) for line in lines]
+
+    plan = plan_route(obstacles, start, targets)
+
+    assert plan.unreachable == ()
+    walls = unary_union([Polygon(ring).buffer(-1e-3) for ring in obstacles])
+    assert not plan.route.intersects(walls)
+    for target in targets:
+        assert plan.route.distance(Point(target)) <= 2.0
+    assert list(plan.route.coords)[0] == pytest.approx(start)
+    assert list(plan.route.coords)[-1] == pytest.approx(start)
