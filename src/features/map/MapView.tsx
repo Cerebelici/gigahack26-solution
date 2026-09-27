@@ -48,6 +48,27 @@ const DIMMABLE: Array<[layer: string, property: "fill-opacity" | "line-opacity",
   ["route-flow", "line-opacity", 0.85],
 ];
 
+/** Legend groups the viewer can show or hide. */
+export type MarkerGroup = "canopy" | "interrow" | "row" | "waste" | "route" | "parcel";
+
+const GROUP_LAYERS: Record<MarkerGroup, string[]> = {
+  canopy: ["vineyard-fill", "vineyard-line"],
+  interrow: ["interrow-fill", "interrow-line"],
+  row: ["row-hit", "row-glow", "row-line"],
+  waste: ["waste-fill", "waste-glow", "waste-line"],
+  route: [
+    "route-hit",
+    "route-glow",
+    "route-line",
+    "route-flow",
+    "planned-route-glow",
+    "planned-route-line",
+    "planned-route-flow",
+    "planned-route-miss",
+  ],
+  parcel: ["cadastral-fill", "cadastral-line"],
+};
+
 // Data-driven values do not interpolate: a transition would show the old opacity for its whole duration.
 const NO_TRANSITION = { duration: 0, delay: 0 };
 
@@ -142,6 +163,14 @@ function applyBlock(map: MapLibreMap, block: string | null, revealing: boolean) 
   for (const [layer, property, base] of DIMMABLE) {
     const opacity = blockOpacity(base, block);
     map.setPaintProperty(layer, property, revealing ? withReveal(opacity) : opacity);
+  }
+}
+
+/** Hidden layers also drop out of `queryRenderedFeatures`, so they stop taking clicks. */
+function applyVisibility(map: MapLibreMap, hidden: ReadonlySet<MarkerGroup>) {
+  for (const [group, layers] of Object.entries(GROUP_LAYERS) as Array<[MarkerGroup, string[]]>) {
+    const visibility = hidden.has(group) ? "none" : "visible";
+    for (const layer of layers) map.setLayoutProperty(layer, "visibility", visibility);
   }
 }
 
@@ -458,7 +487,10 @@ interface MapViewProps {
   onRevealProgress?: (progress: RevealProgress | null) => void;
   plannedRoute?: PlannedRoute | null;
   cadastral?: CadastralFeature | null;
+  hiddenGroups?: ReadonlySet<MarkerGroup>;
 }
+
+const NO_HIDDEN: ReadonlySet<MarkerGroup> = new Set();
 
 const HUD_LINGER_MS = 1400;
 
@@ -472,6 +504,7 @@ export function MapView({
   onRevealProgress,
   plannedRoute = null,
   cadastral = null,
+  hiddenGroups = NO_HIDDEN,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -479,7 +512,7 @@ export function MapView({
   const onMapClickRef = useRef(onMapClick);
   const onRevealRef = useRef(onRevealProgress);
   const interactionRef = useRef(interaction);
-  const stateRef = useRef({ highlightedIds, activeBlock, plannedRoute, cadastral });
+  const stateRef = useRef({ highlightedIds, activeBlock, plannedRoute, cadastral, hiddenGroups });
   const lastBlockRef = useRef<string | null>(activeBlock);
   const revealRef = useRef<RevealHandle | null>(null);
   /** True while the real layers' opacity is multiplied by the reveal state. */
@@ -494,7 +527,7 @@ export function MapView({
     onMapClickRef.current = onMapClick;
     onRevealRef.current = onRevealProgress;
     interactionRef.current = interaction;
-    stateRef.current = { highlightedIds, activeBlock, plannedRoute, cadastral };
+    stateRef.current = { highlightedIds, activeBlock, plannedRoute, cadastral, hiddenGroups };
   });
 
   useEffect(() => {
@@ -576,6 +609,7 @@ export function MapView({
       setZoom(map.getZoom());
       showPlannedRoute(map, stateRef.current.plannedRoute);
       showCadastral(map, stateRef.current.cadastral);
+      applyVisibility(map, stateRef.current.hiddenGroups);
       ambientRef.current = startAmbientMotion(map, {
         flow: (hasRoutes(data) || stateRef.current.plannedRoute !== null) && !prefersReducedMotion(),
       });
@@ -644,6 +678,12 @@ export function MapView({
     showPlannedRoute(map, plannedRoute);
     ambientRef.current?.setFlow((hasRoutes(data) || plannedRoute !== null) && !reducedMotion);
   }, [plannedRoute, data, reducedMotion]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !readyRef.current) return;
+    applyVisibility(map, hiddenGroups);
+  }, [hiddenGroups]);
 
   useEffect(() => {
     const map = mapRef.current;

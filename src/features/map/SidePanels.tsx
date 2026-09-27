@@ -1,6 +1,7 @@
 import { useMemo, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
 import type { ParcelLookup } from "../../api/geodata";
 import { CountUp } from "../../components/CountUp";
+import type { MarkerGroup } from "./MapView";
 import { MAP_COLORS } from "./palette";
 import { asNumber, formatArea, formatHectares, formatMetres } from "./project";
 import type { FieldFeature } from "./types";
@@ -470,26 +471,41 @@ export function ParcelCard({
 }
 
 const LEGEND = [
-  { label: "Canopy", fill: MAP_COLORS.canopy, border: MAP_COLORS.canopyLine, kind: "area" },
-  { label: "Inter-row", fill: MAP_COLORS.interrow, border: MAP_COLORS.interrowLine, kind: "area" },
-  { label: "Row", fill: MAP_COLORS.row, border: MAP_COLORS.row, kind: "line" },
-  { label: "Waste", fill: "transparent", border: MAP_COLORS.waste, kind: "box" },
-  { label: "Route", fill: MAP_COLORS.route, border: MAP_COLORS.route, kind: "line" },
-  { label: "Parcel", fill: MAP_COLORS.parcel, border: MAP_COLORS.parcelLine, kind: "area" },
-] as const;
+  { group: "canopy", label: "Canopy", fill: MAP_COLORS.canopy, border: MAP_COLORS.canopyLine, kind: "area" },
+  { group: "interrow", label: "Inter-row", fill: MAP_COLORS.interrow, border: MAP_COLORS.interrowLine, kind: "area" },
+  { group: "row", label: "Row", fill: MAP_COLORS.row, border: MAP_COLORS.row, kind: "line" },
+  { group: "waste", label: "Waste", fill: "transparent", border: MAP_COLORS.waste, kind: "box" },
+  { group: "route", label: "Route", fill: MAP_COLORS.route, border: MAP_COLORS.route, kind: "line" },
+  { group: "parcel", label: "Parcel", fill: MAP_COLORS.parcel, border: MAP_COLORS.parcelLine, kind: "area" },
+] as const satisfies ReadonlyArray<{ group: MarkerGroup; label: string; fill: string; border: string; kind: string }>;
 
-export function LegendChip() {
+interface LegendChipProps {
+  hidden: ReadonlySet<MarkerGroup>;
+  onToggle: (group: MarkerGroup) => void;
+}
+
+export function LegendChip({ hidden, onToggle }: LegendChipProps) {
   return (
-    <div className="gbm-legend gbm-float" {...cardEvents}>
-      {LEGEND.map((entry) => (
-        <span key={entry.label} className="gbm-legend-item">
-          <i
-            className={`gbm-swatch gbm-swatch-${entry.kind}`}
-            style={{ background: entry.fill, borderColor: entry.border }}
-          />
-          {entry.label}
-        </span>
-      ))}
+    <div className="gbm-legend gbm-float" role="group" aria-label="Map layers" {...cardEvents}>
+      {LEGEND.map((entry) => {
+        const shown = !hidden.has(entry.group);
+        return (
+          <button
+            key={entry.group}
+            type="button"
+            className={shown ? "gbm-legend-item" : "gbm-legend-item is-off"}
+            aria-pressed={shown}
+            title={shown ? `Hide ${entry.label.toLowerCase()}` : `Show ${entry.label.toLowerCase()}`}
+            onClick={() => onToggle(entry.group)}
+          >
+            <i
+              className={`gbm-swatch gbm-swatch-${entry.kind}`}
+              style={{ background: entry.fill, borderColor: entry.border }}
+            />
+            {entry.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
