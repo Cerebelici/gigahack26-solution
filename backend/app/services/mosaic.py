@@ -1,7 +1,8 @@
 """Combine georeferenced tiles from one or more zips into one orthophoto.
 
 Each TIFF is pasted by its CRS and geotransform, so neighbouring tiles meet on the ground
-whether they arrived in the same zip or in separate ones. CVAT shapes from XML files in a
+whether they arrived in the same zip or in separate ones. A tile that carries no georeferencing,
+as in a CVAT export, is placed by its challenge-grid name. CVAT shapes from XML files in a
 zip are moved into that mosaic's pixel grid, and they match the tiles from that same zip.
 Empty space between tiles is transparent.
 """
@@ -28,7 +29,7 @@ from rasterio.windows import Window
 from starlette.concurrency import run_in_threadpool
 
 from app.services import tif
-from app.services.cvat_annotations import file_basename, parse_annotations
+from app.services.cvat_annotations import TILE_SIZE_M, UTM, file_basename, parse_annotations, tile_origin
 from app.services.tif import TIFF_MAGIC_SIZE, RasterError, StoredRaster, is_tiff
 
 
@@ -218,14 +219,44 @@ def _open_tiles(paths: list[Path]) -> list[_Tile]:
             except rasterio.RasterioError as exc:
                 raise RasterError(f"Could not read {path.name} as a GeoTIFF.") from exc
             if dataset.crs is None or dataset.transform.is_identity:
-                dataset.close()
-                raise RasterError(f"{path.name} has no georeferencing (CRS and geotransform).")
+                dataset = _place_by_name(path, dataset)
             tiles.append(_Tile(name=path.name, dataset=dataset))
     except Exception:
         for tile in tiles:
             tile.dataset.close()
         raise
     return tiles
+
+
+def _place_by_name(path: Path, dataset: DatasetReader) -> DatasetReader:
+    """Rewrite a tile that lost its georeferencing onto the challenge cell its file name gives.
+
+    A CVAT export re-encodes every tile as a PNG and keeps only the original ".tif" name, so
+    the pixels survive but the CRS and geotransform do not. The name still says which 51.2 m
+    cell the tile covers, which is enough to put it back on the grid.
+    """
+    origin = tile_origin(path.name)
+    if origin is None:
+        dataset.close()
+        raise RasterError(f"{path.name} has no georeferencing (CRS and geotransform).")
+    west, north = origin
+    profile: dict[str, Any] = {
+        "driver": "GTiff",
+        "width": dataset.width,
+        "height": dataset.height,
+        "count": dataset.count,
+        "dtype": dataset.dtypes[0],
+        "crs": UTM,
+        "transform": Affine(TILE_SIZE_M / dataset.width, 0, west, 0, -TILE_SIZE_M / dataset.height, north),
+        "compress": "deflate",
+    }
+    data = dataset.read()
+    dataset.close()
+    placed = path.with_name(f"{path.stem}-grid.tif")
+    with rasterio.open(placed, "w", **profile) as out:
+        out.write(data)
+    placed.replace(path)
+    return rasterio.open(path)
 
 
 def _write_mosaic(tiles: list[_Tile], dest: Path) -> None:

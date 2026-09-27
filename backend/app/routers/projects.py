@@ -19,12 +19,11 @@ from app.services.annotations import (
     box_ring,
     create_annotation,
     feature_by_id,
-    feature_collection,
-    features_by_project,
     insert_annotations,
 )
 from app.services.cvat_annotations import items_on_raster
 from app.services.mosaic import store_project_imagery
+from app.services.project_features import features_json, forget as forget_features
 from app.services.route import StartInsideObstacle, plan_route as plan_walking_route
 from app.services.tif import RasterError, StoredRaster, remove_raster
 
@@ -189,10 +188,13 @@ def _summaries(request: Request, db: Session, projects: list[Project]) -> list[P
     ]
 
 
-def _project_out(request: Request, db: Session, project: Project) -> ProjectOut:
-    summary = _summaries(request, db, [project])[0]
-    features = features_by_project(db, [project.id])[project.id]
-    return ProjectOut(**summary.model_dump(), features=feature_collection(features))
+def _geojson(body: bytes) -> Response:
+    return Response(content=body, media_type="application/json")
+
+
+def _project_body(summary: ProjectSummary, features: bytes) -> bytes:
+    """`ProjectOut` as JSON: the summary, with the already-rendered features as its last member."""
+    return summary.model_dump_json().encode()[:-1] + b',"features":' + features + b"}"
 
 
 @router.post("", status_code=201)
@@ -215,9 +217,10 @@ def list_projects(
     return _summaries(request, db, projects)
 
 
-@router.get("/{project_id}")
-def get_project(request: Request, project: Project = Depends(owned_project), db: Session = Depends(get_db)) -> ProjectOut:
-    return _project_out(request, db, project)
+@router.get("/{project_id}", response_model=ProjectOut)
+def get_project(request: Request, project: Project = Depends(owned_project), db: Session = Depends(get_db)) -> Response:
+    summary = _summaries(request, db, [project])[0]
+    return _geojson(_project_body(summary, features_json(db, project.id)))
 
 
 @router.patch("/{project_id}")
@@ -234,6 +237,7 @@ def delete_project(project: Project = Depends(owned_project), db: Session = Depe
     raster_ids = list(db.scalars(select(Raster.id).where(Raster.project_id == project.id)))
     db.delete(project)
     db.commit()
+    forget_features(project.id)
     for raster_id in raster_ids:
         remove_raster(raster_id)
     return Response(status_code=204)
@@ -371,9 +375,9 @@ async def upload_raster(
     return _raster_out(request, raster)
 
 
-@router.get("/{project_id}/annotations")
-def list_annotations(project: Project = Depends(owned_project), db: Session = Depends(get_db)) -> dict[str, Any]:
-    return feature_collection(features_by_project(db, [project.id])[project.id])
+@router.get("/{project_id}/annotations", response_model=dict[str, Any])
+def list_annotations(project: Project = Depends(owned_project), db: Session = Depends(get_db)) -> Response:
+    return _geojson(features_json(db, project.id))
 
 
 @router.post("/{project_id}/annotations", status_code=201)

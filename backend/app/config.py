@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_DATABASE_URL = "postgresql://localhost:5432/gigahack"
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", BACKEND_DIR.parent / "uploads"))
 
+# Rendered project annotations kept in memory, the least recently read dropped first. 0 caches nothing.
+PROJECT_CACHE_MB = float(os.getenv("PROJECT_CACHE_MB", "256"))
+
 JWT_ALGORITHM = "HS256"
 JWT_TTL_HOURS = float(os.getenv("JWT_TTL_HOURS", "24"))
 JWT_SECRET = os.getenv("JWT_SECRET", "")

@@ -21,6 +21,7 @@ Read from the environment, then from `backend/.env` (real environment variables 
 | `JWT_SECRET` | random per process | Signs login tokens. Set it, or every restart logs everyone out. |
 | `JWT_TTL_HOURS` | `24` | Token lifetime. |
 | `UPLOAD_DIR` | `../uploads` (next to this repo) | Where uploaded rasters and their COGs are stored, one folder per raster id. Keep it outside the repo. |
+| `PROJECT_CACHE_MB` | `256` | Memory for the annotations of recently opened projects. A mosaicked vineyard is around 30 MB, and the least recently opened project is dropped first. `0` caches nothing. |
 | `CORS_ORIGINS` | Vite dev and preview origins | Comma-separated allowed origins. |
 | `TEST_DATABASE_URL` | `postgresql://localhost:5432/gigahack_test` | Database the API tests truncate and reuse. Never point it at real data. |
 
@@ -117,6 +118,11 @@ Opening a project adds `features`, a FeatureCollection of that project's annotat
 ```
 
 `raster` is `null` or `{ id, tileUrl, boundsEpsg32635: [minX, minY, maxX, maxY], minzoom, maxzoom }`.
+
+Opening a mosaicked vineyard means reading tens of thousands of annotations, so the FeatureCollection is
+kept in memory (`PROJECT_CACHE_MB`) once it has been built. Only the first load waits for the database;
+later ones are served from memory until the project's annotations change, whoever changed them.
+`GET /projects/{id}/annotations` serves the same bytes.
 
 ### Raster upload
 

@@ -32,7 +32,7 @@ _catalogs: dict[str, dict[str, dict[str, Any]] | None] = {}
 # Challenge tile grid in EPSG:32635: tile rNNN_cNNN has its top-left corner here and is 51.2 m square.
 GRID_ORIGIN = (628992.0, 5221222.4)
 TILE_SIZE_M = 51.2
-TILE_NAME = re.compile(r"siret3_r(\d+)_c(\d+)\.tif$", re.IGNORECASE)
+TILE_NAME = re.compile(r"siret3_r(\d+)_c(\d+)\.tiff?$", re.IGNORECASE)
 UTM = CRS.from_epsg(32635)
 
 

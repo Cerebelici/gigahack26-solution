@@ -7,12 +7,13 @@ import pytest
 import rasterio
 from fastapi.testclient import TestClient
 from rasterio.io import MemoryFile
+from rasterio.shutil import copy as rio_copy
 from rasterio.transform import from_origin
 from rasterio.windows import Window
 from sqlalchemy import text
 
 from app.main import app
-from app.services import cvat_annotations, tif
+from app.services import cvat_annotations, project_features, tif
 from tests.test_process_tif import (
     COLOR,
     PIXEL_M,
@@ -504,6 +505,66 @@ def test_adjacent_zip_tiles_share_an_edge(token, project, upload_dir):
         assert int(ds.read(4, window=Window(size, mid, 1, 1))[0, 0]) == 255
 
 
+# A CVAT export re-encodes each tile as a PNG keeping the ".tif" name, prefixed with its frame id.
+CELL_WEST, CELL_NORTH = 629504.0, 5220300.8  # top-left of siret3_r018_c010
+CELL_SIZE_M = 51.2
+
+CVAT_EXPORT_XML = """<?xml version="1.0" encoding="utf-8"?>
+<annotations>
+  <image name="6436_siret3_r018_c010.tif" width="64" height="64">
+    <polygon label="vineyard" points="0,0;32,0;32,32">
+      <attribute name="vineyard_id">CVAT</attribute>
+    </polygon>
+  </image>
+</annotations>
+"""
+
+
+def solid_png(color: tuple[int, int, int], size: int = 64) -> bytes:
+    data = np.empty((3, size, size), dtype=np.uint8)
+    data[0], data[1], data[2] = color
+    with MemoryFile() as source, MemoryFile(filename="tile.png") as out:
+        with source.open(driver="GTiff", width=size, height=size, count=3, dtype="uint8") as dst:
+            dst.write(data)
+        with source.open() as src:
+            rio_copy(src, out.name, driver="PNG")
+        return out.read()
+
+
+def test_cvat_export_tiles_are_placed_by_their_grid_name(token, project, upload_dir):
+    res = upload_zip(
+        token,
+        project["id"],
+        zip_bytes(
+            {
+                "images/6436_siret3_r018_c010.tif": solid_png(LEFT_COLOR),
+                "images/6437_siret3_r018_c011.tif": solid_png(RIGHT_COLOR),
+                "annotations.xml": CVAT_EXPORT_XML.encode(),
+            }
+        ),
+    )
+    assert res.status_code == 200, res.text
+    raster = res.json()
+    assert raster["boundsEpsg32635"] == pytest.approx(
+        [CELL_WEST, CELL_NORTH - CELL_SIZE_M, CELL_WEST + 2 * CELL_SIZE_M, CELL_NORTH], abs=1e-3
+    )
+    with rasterio.open(upload_dir / raster["id"] / "raster.tif") as ds:
+        assert (ds.width, ds.height) == (128, 64)
+        assert tuple(int(v) for v in ds.read(window=Window(4, 4, 1, 1))[:3, 0, 0]) == LEFT_COLOR
+        assert tuple(int(v) for v in ds.read(window=Window(124, 4, 1, 1))[:3, 0, 0]) == RIGHT_COLOR
+
+    features = client.get(f"/projects/{project['id']}/annotations", headers=auth(token)).json()["features"]
+    assert [feature["properties"]["vineyard_id"] for feature in features] == ["CVAT"]
+    assert features[0]["geometry"]["coordinates"][0][0] == pytest.approx([CELL_WEST, CELL_NORTH], abs=1e-3)
+
+
+def test_tile_with_neither_georeferencing_nor_a_grid_name_is_rejected(token, project, upload_dir):
+    res = upload_zip(token, project["id"], zip_bytes({"plain.tif": solid_png(LEFT_COLOR)}))
+    assert res.status_code == 400
+    assert res.json()["detail"] == "plain.tif has no georeferencing (CRS and geotransform)."
+    assert not any(upload_dir.iterdir())
+
+
 def test_zip_without_a_geotiff_is_rejected(token, project, upload_dir):
     res = upload_zip(
         token,
@@ -670,6 +731,79 @@ def test_polygon_with_hole(token, project):
     ).json()
     assert len(feature["geometry"]["coordinates"]) == 2
     assert feature["properties"]["pixelRings"] == rings
+
+
+# Cached annotations
+
+
+def add_vineyard(token: str, project_id: int):
+    rings = [[0, 0], [100, 0], [100, 100], [0, 100]]
+    res = client.post(
+        f"/projects/{project_id}/annotations", json={"label": "vineyard", "rings": rings}, headers=auth(token)
+    )
+    assert res.status_code == 201, res.text
+    return res
+
+
+@pytest.fixture
+def reads(monkeypatch) -> list[int]:
+    """Projects whose annotations were read from the database, in order."""
+    seen: list[int] = []
+    from_db = project_features.features_by_project
+
+    def counted(db, project_ids):
+        seen.extend(project_ids)
+        return from_db(db, project_ids)
+
+    monkeypatch.setattr(project_features, "features_by_project", counted)
+    return seen
+
+
+def test_project_load_is_cached_until_its_annotations_change(token, project, reads):
+    upload_raster(token, project["id"])
+    add_vineyard(token, project["id"])
+    first = client.get(f"/projects/{project['id']}", headers=auth(token)).json()
+    assert reads == [project["id"]]
+
+    assert client.get(f"/projects/{project['id']}", headers=auth(token)).json() == first
+    assert client.get(f"/projects/{project['id']}/annotations", headers=auth(token)).json() == first["features"]
+    assert reads == [project["id"]], "annotations already read are served from memory"
+
+    client.patch(f"/projects/{project['id']}", json={"name": "Renamed"}, headers=auth(token))
+    renamed = client.get(f"/projects/{project['id']}", headers=auth(token)).json()
+    assert (renamed["name"], renamed["features"]) == ("Renamed", first["features"])
+    assert reads == [project["id"]], "a rename leaves the annotations alone"
+
+    box = {"xtl": 10, "ytl": 20, "xbr": 50, "ybr": 60}
+    client.post(f"/projects/{project['id']}/annotations", json={"label": "waste", "box": box}, headers=auth(token))
+    fresh = client.get(f"/projects/{project['id']}", headers=auth(token)).json()
+    assert len(fresh["features"]["features"]) == 2
+    assert reads == [project["id"], project["id"]], "a new annotation is read again"
+
+
+def test_project_cache_drops_the_least_recently_read_project(token, project, reads, monkeypatch):
+    upload_raster(token, project["id"])
+    add_vineyard(token, project["id"])
+    other = client.post("/projects", json={"name": "Second"}, headers=auth(token)).json()
+    upload_raster(token, other["id"])
+    add_vineyard(token, other["id"])
+
+    body = client.get(f"/projects/{project['id']}/annotations", headers=auth(token)).content
+    monkeypatch.setattr(project_features, "MAX_BYTES", len(body))  # room for one project
+    reads.clear()
+
+    client.get(f"/projects/{other['id']}/annotations", headers=auth(token))
+    assert client.get(f"/projects/{project['id']}/annotations", headers=auth(token)).content == body
+    assert reads == [other["id"], project["id"]], "the second project takes the room the first was using"
+
+
+def test_project_cache_can_be_turned_off(token, project, reads, monkeypatch):
+    monkeypatch.setattr(project_features, "MAX_BYTES", 0)
+    upload_raster(token, project["id"])
+    add_vineyard(token, project["id"])
+    for _ in range(2):
+        assert len(client.get(f"/projects/{project['id']}", headers=auth(token)).json()["features"]["features"]) == 1
+    assert reads == [project["id"], project["id"]]
 
 
 # Route stub and CORS
