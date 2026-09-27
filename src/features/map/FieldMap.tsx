@@ -74,7 +74,7 @@ function routeError(err: unknown): string {
 
 interface FieldMapProps {
   data: FieldData;
-  /** Cards stacked above the blocks list in the left column. */
+  /** Cards stacked above the route planner in the left column. */
   side?: ReactNode;
   /** Floating chrome such as banners. */
   overlay?: ReactNode;
@@ -149,9 +149,11 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
     planRoute && (routeType !== null || targetPick || placing || targetFids.length > 0);
 
   const highlightedIds = useMemo(() => {
+    // A calculated route sits under the target halo. The pulse widens those rows and hides the path.
+    if (routeResult) return [];
     if (routeHighlight) return targetFids;
     return selectedId === null ? [] : [selectedId];
-  }, [routeHighlight, targetFids, selectedId]);
+  }, [routeResult, routeHighlight, targetFids, selectedId]);
 
   const anchorLngLat = useMemo(() => (anchor ? toLngLat(anchor) : null), [anchor]);
 
@@ -159,9 +161,9 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
   const routeItems = useMemo(() => featuresInBlock(data.items, activeBlock), [data.items, activeBlock]);
 
   const routePlan = useMemo<RoutePlanRequest | null>(() => {
-    if (!planRoute || !routeType || !anchor) return null;
+    if (!planRoute || activeBlock === null || !routeType || !anchor) return null;
     return buildRoutePlanRequest(routeType, routeItems, geometries, targetFids, anchor);
-  }, [planRoute, routeType, anchor, routeItems, geometries, targetFids]);
+  }, [planRoute, activeBlock, routeType, anchor, routeItems, geometries, targetFids]);
 
   const plannedRoute = useMemo<PlannedRoute | null>(() => {
     if (!routeResult) return null;
@@ -213,6 +215,7 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
   }, [staleRoute]);
 
   const resetRoute = useCallback(() => {
+    setActiveBlock(null);
     setRouteType(null);
     setTargetFids([]);
     setAnchor(null);
@@ -316,15 +319,17 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
   );
 
   const routeBlocker =
-    projectId === undefined
-      ? "Sign in and open a project to plan a route on it."
-      : routeType === null
-        ? "Choose a route type."
-        : targetFids.length === 0
-          ? "Add at least one target."
-          : anchor === null
-            ? "Place the start point on the map."
-            : null;
+    activeBlock === null
+      ? "Choose a vineyard."
+      : projectId === undefined
+        ? "Sign in and open a project to plan a route on it."
+        : routeType === null
+          ? "Choose a route type."
+          : targetFids.length === 0
+            ? "Add at least one target."
+            : anchor === null
+              ? "Place the start point on the map."
+              : null;
 
   const planNow = useCallback(async () => {
     if (projectId === undefined || !routePlan) return;
@@ -439,7 +444,10 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
                 }
                 error={routeFailure}
                 blocker={routeBlocker}
+                blocks={data.blocks}
+                items={data.items}
                 block={activeBlock}
+                onBlock={chooseBlock}
                 onRouteType={chooseRouteType}
                 onTargetPick={onTargetPick}
                 onPlace={onPlace}
@@ -451,7 +459,7 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
               />
             </aside>
           )}
-          {hasItems && (
+          {hasItems && !planRoute && (
             <BlocksCard
               blocks={data.blocks}
               items={data.items}

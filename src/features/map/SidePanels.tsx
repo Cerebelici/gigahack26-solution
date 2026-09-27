@@ -72,7 +72,7 @@ export function SampleBanner() {
 
 interface BlocksCardProps {
   blocks: string[];
-  items: FieldFeature[];
+  items: readonly FieldFeature[];
   activeBlock: string | null;
   onChange: (block: string | null) => void;
   /** 0–1 while the map reveal is drawing rows. */
@@ -90,8 +90,57 @@ function RowSummary({ rows, share }: { rows: FieldFeature[]; share: number }) {
   );
 }
 
-export function BlocksCard({ blocks, items, activeBlock, onChange, rowShare = 1 }: BlocksCardProps) {
+export function BlockChoices({
+  blocks,
+  items,
+  activeBlock,
+  onChange,
+  rowShare = 1,
+  allowAll = true,
+  label,
+}: BlocksCardProps & { allowAll?: boolean; label?: string }) {
   const rows = items.filter((item) => item.label === "row");
+  return (
+    <ul className="gbm-block-list gbm-stagger" role={label ? "radiogroup" : undefined} aria-label={label}>
+      {allowAll && (
+        <li style={staggered(0)}>
+          <button
+            type="button"
+            role={label ? "radio" : undefined}
+            aria-checked={label ? activeBlock === null : undefined}
+            className={activeBlock === null ? "gbm-block is-active" : "gbm-block"}
+            onClick={() => onChange(null)}
+          >
+            <span className="gbm-block-name">All blocks</span>
+            <RowSummary rows={rows} share={rowShare} />
+          </button>
+        </li>
+      )}
+      {blocks.map((block, index) => (
+        <li key={block} style={staggered(allowAll ? index + 1 : index)}>
+          <button
+            type="button"
+            role={label ? "radio" : undefined}
+            aria-checked={label ? activeBlock === block : undefined}
+            className={activeBlock === block ? "gbm-block is-active" : "gbm-block"}
+            onClick={() => {
+              if (activeBlock === block) {
+                if (allowAll) onChange(null);
+                return;
+              }
+              onChange(block);
+            }}
+          >
+            <span className="gbm-block-name">{block}</span>
+            <RowSummary rows={rows.filter((row) => row.block === block)} share={rowShare} />
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function BlocksCard({ blocks, items, activeBlock, onChange, rowShare = 1 }: BlocksCardProps) {
   return (
     <aside className="gbm-card gbm-blocks gbm-float" {...cardEvents}>
       <div className="gbm-card-title">
@@ -100,30 +149,7 @@ export function BlocksCard({ blocks, items, activeBlock, onChange, rowShare = 1 
           <CountUp value={blocks.length} /> {blocks.length === 1 ? "block" : "blocks"}
         </span>
       </div>
-      <ul className="gbm-block-list gbm-stagger">
-        <li style={staggered(0)}>
-          <button
-            type="button"
-            className={activeBlock === null ? "gbm-block is-active" : "gbm-block"}
-            onClick={() => onChange(null)}
-          >
-            <span className="gbm-block-name">All blocks</span>
-            <RowSummary rows={rows} share={rowShare} />
-          </button>
-        </li>
-        {blocks.map((block, index) => (
-          <li key={block} style={staggered(index + 1)}>
-            <button
-              type="button"
-              className={activeBlock === block ? "gbm-block is-active" : "gbm-block"}
-              onClick={() => onChange(activeBlock === block ? null : block)}
-            >
-              <span className="gbm-block-name">{block}</span>
-              <RowSummary rows={rows.filter((row) => row.block === block)} share={rowShare} />
-            </button>
-          </li>
-        ))}
-      </ul>
+      <BlockChoices blocks={blocks} items={items} activeBlock={activeBlock} onChange={onChange} rowShare={rowShare} />
     </aside>
   );
 }
