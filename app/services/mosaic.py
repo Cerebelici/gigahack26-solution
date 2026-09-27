@@ -21,7 +21,7 @@ import numpy as np
 import rasterio
 from rasterio.crs import CRS
 from rasterio.enums import ColorInterp, Resampling
-from rasterio.io import DatasetReader
+from rasterio.io import DatasetReader, DatasetWriter
 from rasterio.transform import Affine
 from rasterio.warp import reproject, transform_bounds
 from rasterio.windows import Window
@@ -336,7 +336,7 @@ def _bounds_in(dataset: DatasetReader, dst_crs: CRS) -> tuple[float, float, floa
     return bounds
 
 
-def _paste(src: DatasetReader, dst: rasterio.DatasetWriter, dst_crs: CRS) -> None:
+def _paste(src: DatasetReader, dst: DatasetWriter, dst_crs: CRS) -> None:
     """Copy one tile into the mosaic. Unwritten pixels stay transparent, so gaps stay empty."""
     aligned = _aligned_origin(src, dst)
     if aligned is not None:
@@ -345,7 +345,7 @@ def _paste(src: DatasetReader, dst: rasterio.DatasetWriter, dst_crs: CRS) -> Non
     _paste_reprojected(src, dst, dst_crs)
 
 
-def _aligned_origin(src: DatasetReader, dst: rasterio.DatasetWriter) -> tuple[int, int] | None:
+def _aligned_origin(src: DatasetReader, dst: DatasetWriter) -> tuple[int, int] | None:
     """Pixel column and row of this tile's top-left when it sits on the mosaic grid."""
     if not _same_epsg(src, dst.crs) or not _north_up(src):
         return None
@@ -362,13 +362,13 @@ def _aligned_origin(src: DatasetReader, dst: rasterio.DatasetWriter) -> tuple[in
     return col_i, row_i
 
 
-def _paste_aligned(src: DatasetReader, dst: rasterio.DatasetWriter, col: int, row: int) -> None:
+def _paste_aligned(src: DatasetReader, dst: DatasetWriter, col: int, row: int) -> None:
     window = Window(col, row, src.width, src.height)
     dst.write(_read_rgb(src), indexes=(1, 2, 3), window=window)
     dst.write(np.full((src.height, src.width), 255, dtype=np.uint8), indexes=4, window=window)
 
 
-def _paste_reprojected(src: DatasetReader, dst: rasterio.DatasetWriter, dst_crs: CRS) -> None:
+def _paste_reprojected(src: DatasetReader, dst: DatasetWriter, dst_crs: CRS) -> None:
     width, height = src.width, src.height
     ground = [src.transform @ (x, y) for x, y in ((0, 0), (width, 0), (0, height), (width, height))]
     if not _same_epsg(src, dst_crs):
