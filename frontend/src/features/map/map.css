@@ -759,7 +759,30 @@ a.gbm-text-btn {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  margin: -4px -6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: inherit;
+  font: inherit;
   white-space: nowrap;
+  cursor: pointer;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.gbm-legend-item:hover {
+  color: var(--ink);
+}
+
+.gbm-legend-item:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+
+.gbm-legend-item.is-off {
+  opacity: 0.4;
+  text-decoration: line-through;
 }
 
 .gbm-swatch {

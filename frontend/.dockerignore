@@ -1,0 +1,9 @@
+node_modules
+dist
+.git
+.agents
+knowledge
+*.log
+.DS_Store
+Dockerfile
+.dockerignore

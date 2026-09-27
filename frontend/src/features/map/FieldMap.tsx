@@ -14,7 +14,14 @@ import {
   featuresInBlock,
   routeTargetFids,
 } from "../projects/routeTargets";
-import { MapView, type CadastralFeature, type MapClick, type MapInteraction, type PlannedRoute } from "./MapView";
+import {
+  MapView,
+  type CadastralFeature,
+  type MapClick,
+  type MapInteraction,
+  type MarkerGroup,
+  type PlannedRoute,
+} from "./MapView";
 import { fromLngLat, mapGeometry, roundMetres, toLngLat } from "./project";
 import { PENDING_REVEAL, revealShare, type RevealProgress } from "./revealAnimation";
 import { BlocksCard, DetailCard, LegendChip, ParcelCard, type ParcelPhase } from "./SidePanels";
@@ -81,6 +88,15 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
   const [activeBlock, setActiveBlock] = useState<string | null>(null);
   const [navCollapsed, setNavCollapsed] = useState(() => readFlag(NAV_COLLAPSED_KEY));
   const [leftCollapsed, setLeftCollapsed] = useState(() => readFlag(LEFT_COLLAPSED_KEY));
+  const [hiddenGroups, setHiddenGroups] = useState<ReadonlySet<MarkerGroup>>(() => new Set());
+
+  const toggleGroup = useCallback((group: MarkerGroup) => {
+    setHiddenGroups((current) => {
+      const next = new Set(current);
+      if (!next.delete(group)) next.add(group);
+      return next;
+    });
+  }, []);
   const [shownData, setShownData] = useState(data);
   const [routeType, setRouteType] = useState<RouteTypeId | null>(null);
   const [targetFids, setTargetFids] = useState<number[]>([]);
@@ -363,6 +379,7 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
         onRevealProgress={setReveal}
         plannedRoute={plannedRoute}
         cadastral={cadastral}
+        hiddenGroups={hiddenGroups}
       />
       <div className="gbm-chrome">
         <div className="gbm-topbar-wrap" onClick={(event) => event.stopPropagation()}>
@@ -460,7 +477,7 @@ export function FieldMap({ data, side, overlay, planRoute = false, projectId }: 
             )}
           </div>
         )}
-        <LegendChip />
+        <LegendChip hidden={hiddenGroups} onToggle={toggleGroup} />
       </div>
     </div>
   );
