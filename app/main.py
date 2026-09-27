@@ -8,7 +8,7 @@ from sqlalchemy.exc import OperationalError
 
 from app import config  # noqa: F401  loads .env before anything reads the environment
 from app.log import configure_logging
-from app.routers import auth, process_tif, projects, tiles
+from app.routers import auth, geodata, process_tif, projects, tiles
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -38,3 +38,4 @@ app.include_router(process_tif.router)
 app.include_router(tiles.router)
 app.include_router(auth.router)
 app.include_router(projects.router)
+app.include_router(geodata.router)

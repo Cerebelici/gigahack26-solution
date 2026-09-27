@@ -14,3 +14,4 @@ geoalchemy2>=0.15
 argon2-cffi>=23.1
 pyjwt>=2.8
 python-dotenv>=1.0
+certifi>=2024.8
