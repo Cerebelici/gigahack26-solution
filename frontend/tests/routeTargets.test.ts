@@ -41,11 +41,6 @@ eq(
 );
 eq(routeTargetFids("waste", data.items), waste.map((item) => item.fid), "waste route");
 eq(routeTargetFids("inspection", data.items), gaps.map((item) => item.fid), "inspection route");
-eq(
-  routeTargetFids("full", data.items),
-  [...gaps, ...waste].map((item) => item.fid),
-  "full route",
-);
 
 const wasteFid = waste[0]?.fid ?? -1;
 const gapFid = gaps[0]?.fid ?? -1;
@@ -53,6 +48,11 @@ const plan = buildRoutePlanRequest("waste", data.items, geometries, [wasteFid, g
 eq(plan.routeType, "waste", "route type");
 eq(plan.start, [629500.12, 5220200.34], "start");
 eq(plan.obstacles.length, data.items.filter((item) => item.label === "row").length, "every row axis is an obstacle");
+eq(
+  plan.canopies.length,
+  data.items.filter((item) => item.label === "vineyard").length,
+  "every canopy is ground the walk must not cross",
+);
 eq(
   plan.targets,
   [gapFid, wasteFid].sort((a, b) => a - b).map((fid) => targetPoint(geometries.get(fid) as Geometry)),
@@ -192,11 +192,16 @@ eq(
   "a vineyard keeps its own row gaps",
 );
 eq(routeTargetFids("waste", v01), [], "a vineyard without waste has no waste targets");
-const v01Plan = buildRoutePlanRequest("full", v01, geometries, routeTargetFids("full", v01), [629500, 5220200]);
+const v01Plan = buildRoutePlanRequest("inspection", v01, geometries, routeTargetFids("inspection", v01), [629500, 5220200]);
 eq(
   v01Plan.obstacles.length,
   data.items.filter((item) => item.label === "row" && item.block === "V01").length,
   "obstacles are the rows of that vineyard",
+);
+eq(
+  v01Plan.canopies.length,
+  v01.filter((item) => item.label === "vineyard").length,
+  "canopies are the vines of that vineyard",
 );
 eq(featuresInBlock(data.items, null).length, data.items.length, "no vineyard keeps the whole field");
 

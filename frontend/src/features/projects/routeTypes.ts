@@ -4,11 +4,6 @@
  */
 export const ROUTE_TYPES = [
   {
-    id: "full",
-    name: "Full inspection walk",
-    targets: "Row gaps, missing planting and waste",
-  },
-  {
     id: "inspection",
     name: "Row gap inspection",
     targets: "Row gaps ≥ 5 m and possibly missing planting",

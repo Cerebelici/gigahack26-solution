@@ -31,9 +31,12 @@ export function isSelectableRouteTarget(item: FieldFeature): boolean {
 }
 
 export function matchesRouteType(routeType: RouteTypeId, item: FieldFeature): boolean {
-  if (routeType === "waste") return isWaste(item);
-  if (routeType === "inspection") return isRowGap(item);
-  return isWaste(item) || isRowGap(item);
+  switch (routeType) {
+    case "waste":
+      return isWaste(item);
+    case "inspection":
+      return isRowGap(item);
+  }
 }
 
 export function routeTargetFids(routeType: RouteTypeId, items: readonly FieldFeature[]): number[] {
@@ -186,9 +189,24 @@ export function rowStrip(line: Position[], halfWidth = ROW_HALF_WIDTH_M): Metres
   return [...left, ...right.reverse()];
 }
 
+/** Exterior ring of one canopy polygon, open, in the same metres as the planner. */
+function canopyRings(geometry: Geometry): Metres[][] {
+  const rings =
+    geometry.type === "Polygon"
+      ? [geometry.coordinates[0] ?? []]
+      : geometry.type === "MultiPolygon"
+        ? geometry.coordinates.map((polygon) => polygon[0] ?? [])
+        : [];
+  return rings.flatMap((ring) => {
+    const open = openRing(ring);
+    return open.length >= 3 ? [open.map(([x, y]): Metres => [x, y])] : [];
+  });
+}
+
 /**
  * Request for the backend planner. Geometry must be in EPSG:32635 metres, indexed by `fid`.
- * Every row axis in `items` is an obstacle; the selected objects are the targets.
+ * Every row axis in `items` is an obstacle strip. Every canopy polygon is ground the walk
+ * must not cross. The selected objects are the targets.
  * Pass `featuresInBlock` when the walk should stay on one vineyard.
  */
 export function buildRoutePlanRequest(
@@ -204,6 +222,11 @@ export function buildRoutePlanRequest(
     const strip = rowStrip(geometry.coordinates);
     return strip ? [strip] : [];
   });
+  const canopies = items.flatMap((item) => {
+    const geometry = geometries.get(item.fid);
+    if (item.label !== "vineyard" || !geometry) return [];
+    return canopyRings(geometry);
+  });
   const targets = [...targetFids]
     .sort((a, b) => a - b)
     .flatMap((fid) => {
@@ -212,5 +235,5 @@ export function buildRoutePlanRequest(
       const point = item && geometry && isSelectableRouteTarget(item) ? targetPoint(geometry) : null;
       return point ? [point] : [];
     });
-  return { routeType, obstacles, start: [start[0], start[1]], targets };
+  return { routeType, obstacles, canopies, start: [start[0], start[1]], targets };
 }

@@ -1,3 +1,5 @@
+import { formatMetres } from "../map/project";
+import type { FieldFeature } from "../map/types";
 import { ROUTE_RULES, ROUTE_TYPES, type RouteTypeId } from "./routeTypes";
 import "../map/map.css";
 
@@ -19,8 +21,12 @@ type RoutePlannerProps = {
   error: string | null;
   /** Why the route cannot be planned yet, or null when it can. */
   blocker: string | null;
-  /** Vineyard id the walk is limited to, or null for the whole field. */
+  /** Vineyards the walk can cover. One must be chosen before the route. */
+  blocks: string[];
+  items: readonly FieldFeature[];
+  /** Vineyard id the walk is limited to, or null until one is chosen. */
   block: string | null;
+  onBlock: (block: string) => void;
   onRouteType: (routeType: RouteTypeId) => void;
   onTargetPick: (pick: boolean) => void;
   onPlace: (placing: boolean) => void;
@@ -28,12 +34,18 @@ type RoutePlannerProps = {
   onClearRoute: () => void;
   onClearStart: () => void;
   onClearTargets: () => void;
-  /** Clears the route type, start point, targets, and planned route. */
+  /** Clears the vineyard, route type, start point, targets, and planned route. */
   onReset: () => void;
 };
 
 function targetMeta(count: number): string {
   return `${count} ${count === 1 ? "target" : "targets"}`;
+}
+
+function vineyardOption(block: string, items: readonly FieldFeature[]): string {
+  const rows = items.filter((item) => item.label === "row" && item.block === block);
+  const length = rows.reduce((sum, row) => sum + (row.lengthM ?? 0), 0);
+  return `${block} · ${rows.length} ${rows.length === 1 ? "row" : "rows"} · ${formatMetres(length)}`;
 }
 
 function StepHead({ step, title, done }: { step: number; title: string; done: boolean }) {
@@ -55,7 +67,10 @@ export function RoutePlanner({
   result,
   error,
   blocker,
+  blocks,
+  items,
   block,
+  onBlock,
   onRouteType,
   onTargetPick,
   onPlace,
@@ -65,9 +80,10 @@ export function RoutePlanner({
   onClearTargets,
   onReset,
 }: RoutePlannerProps) {
-  const touched = routeType !== null || anchor !== null || targetCount > 0 || result !== null;
+  const touched = block !== null || routeType !== null || anchor !== null || targetCount > 0 || result !== null;
   return (
     <section className="gbm-route">
+      <div className="gbm-route-body">
       <div className="gbm-section-head">
         <h4>Route planning</h4>
         <span>{targetMeta(targetCount)}</span>
@@ -77,7 +93,6 @@ export function RoutePlanner({
           </button>
         )}
       </div>
-      {block && <p className="gbm-route-hint">This walk uses {block} only. Other blocks are left out.</p>}
 
       <StepHead step={1} title="Route type" done={routeType !== null} />
       <ul className="gbm-route-list" role="radiogroup" aria-label="Route type">
@@ -193,6 +208,32 @@ export function RoutePlanner({
             </button>
           </div>
         )}
+      </div>
+      </div>
+      <div className="gbm-vineyard-dock">
+        <div className="gbm-vineyard-label">
+          <span>Vineyard</span>
+          <span>
+            {blocks.length} {blocks.length === 1 ? "vineyard" : "vineyards"}
+          </span>
+        </div>
+        <select
+          className={block === null ? "gbm-vineyard-select is-empty" : "gbm-vineyard-select"}
+          aria-label="Vineyard"
+          value={block ?? ""}
+          onChange={(event) => {
+            if (event.target.value) onBlock(event.target.value);
+          }}
+        >
+          <option value="" disabled>
+            Choose a vineyard
+          </option>
+          {blocks.map((id) => (
+            <option key={id} value={id}>
+              {vineyardOption(id, items)}
+            </option>
+          ))}
+        </select>
       </div>
     </section>
   );

@@ -35,11 +35,13 @@ export type Metres = [x: number, y: number];
 
 /**
  * Body for `POST /projects/:id/routes`, all in EPSG:32635 metres.
- * The walk leaves `start` and returns to it, never entering an `obstacles` ring.
+ * The walk leaves `start` and returns to it, never entering an `obstacles` ring
+ * or a `canopies` ring.
  */
 export type RoutePlanRequest = {
   routeType: RouteTypeId;
   obstacles: Metres[][];
+  canopies: Metres[][];
   start: Metres;
   targets: Metres[];
 };
